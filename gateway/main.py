@@ -10,9 +10,10 @@ from gateway.ingestion.link_input_handler import LinkInputHandler
 from gateway.analysis.hidden_content_analyzer import HiddenContentAnalyzer
 from gateway.analysis.prompt_injection_detector import PromptInjectionDetector
 from gateway.analysis.exfiltration_detector import ExfiltrationDetector
+from gateway.analysis.agentic_intent_detector import AgenticIntentDetector
 from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
-from shared.schemas import SecurityEvent, SecurityDecision, ContentBlock
+from shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
 from shared.logging_utils import SecurityLogger
 
 
@@ -24,6 +25,7 @@ class UnseenLinkGuard:
         self.hidden_analyzer = HiddenContentAnalyzer()
         self.injection_detector = PromptInjectionDetector()
         self.exfiltration_detector = ExfiltrationDetector()
+        self.agentic_detector = AgenticIntentDetector()
         self.policy_engine = PolicyEngine()
         self.agent_controller = AgentController()
         self.logger = SecurityLogger()
@@ -76,6 +78,12 @@ class UnseenLinkGuard:
         )
         analysis_results.append(exfiltration_analysis)
         
+        agentic_analysis = self.agentic_detector.analyze(
+            extracted.visible_text,
+            extracted.hidden_elements
+        )
+        analysis_results.append(agentic_analysis)
+        
         assessment = self.policy_engine.make_decision(
             analysis_results,
             extracted.visible_text,
@@ -85,14 +93,26 @@ class UnseenLinkGuard:
         assessment.content_blocks = content_blocks
         assessment.source = extracted.metadata.get("source_url", "direct_input")
         
+        if agentic_analysis.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            assessment.agentic_intent_detected = True
+            requested_actions = [
+                f.get('action') for f in agentic_analysis.findings 
+                if f.get('type') == 'action_request' and f.get('action')
+            ]
+            assessment.requested_actions = list(set(requested_actions))
+        
         session_id = str(uuid.uuid4())
         
-        if assessment.decision != SecurityDecision.ALLOW:
-            restrictions = self.policy_engine._determine_restrictions(
-                assessment.overall_risk,
-                analysis_results
-            )
-            self.agent_controller.apply_restrictions(session_id, restrictions)
+        restrictions = self.policy_engine._determine_restrictions(
+            assessment.overall_risk,
+            analysis_results
+        )
+        
+        apply_result = self.agent_controller.apply_restrictions(session_id, restrictions)
+        
+        self.logger.log_info(
+            f"Restrictions applied: mode={restrictions.mode}, enforcement={apply_result.get('enforcement_status')}"
+        )
         
         event = SecurityEvent(
             event_id=assessment.input_id,
@@ -107,14 +127,19 @@ class UnseenLinkGuard:
                     "module": r.module_name,
                     "risk": r.risk_level.value,
                     "confidence": r.confidence,
-                    "details": r.details
+                    "details": r.details,
+                    "risk_score": r.risk_score
                 }
                 for r in analysis_results
             ],
             metadata={
                 "session_id": session_id,
                 "risk_score": assessment.risk_score,
-                "restricted_capabilities": assessment.restricted_capabilities
+                "restricted_capabilities": assessment.restricted_capabilities,
+                "agentic_intent_detected": assessment.agentic_intent_detected,
+                "requested_actions": assessment.requested_actions,
+                "enforcement_mode": restrictions.mode,
+                "requires_approval": restrictions.requires_approval
             }
         )
         
@@ -132,6 +157,8 @@ class UnseenLinkGuard:
             "decision": assessment.decision.value,
             "risk_level": assessment.overall_risk.value,
             "risk_score": round(assessment.risk_score, 3),
+            "agentic_intent_detected": assessment.agentic_intent_detected,
+            "requested_actions": assessment.requested_actions,
             "content": {
                 "original": assessment.content_blocks[0].content if assessment.content_blocks else "",
                 "sanitized": assessment.sanitized_content,
@@ -143,7 +170,8 @@ class UnseenLinkGuard:
                     "risk": r.risk_level.value,
                     "confidence": round(r.confidence, 3),
                     "findings_count": len(r.findings),
-                    "details": r.details
+                    "details": r.details,
+                    "risk_score": round(r.risk_score, 3)
                 }
                 for r in assessment.analysis_results
             ],
@@ -189,6 +217,12 @@ def main():
                 print(f"Decision: {result['decision'].upper()}")
                 print(f"Risk Level: {result['risk_level'].upper()}")
                 print(f"Risk Score: {result['risk_score']}")
+                
+                if result['agentic_intent_detected']:
+                    print(f"\n⚠️  AGENTIC INTENT DETECTED")
+                    if result['requested_actions']:
+                        print(f"Requested Actions: {', '.join(result['requested_actions'])}")
+                
                 print()
                 
                 if result['analysis']:
@@ -196,7 +230,8 @@ def main():
                     for analysis in result['analysis']:
                         print(f"  - {analysis['module']}: {analysis['risk']} "
                               f"(confidence: {analysis['confidence']}, "
-                              f"findings: {analysis['findings_count']})")
+                              f"findings: {analysis['findings_count']}, "
+                              f"risk_score: {analysis['risk_score']})")
                     print()
                 
                 if result['restrictions']:
@@ -233,6 +268,12 @@ def main():
     print(f"Decision: {result['decision'].upper()}")
     print(f"Risk Level: {result['risk_level'].upper()}")
     print(f"Risk Score: {result['risk_score']}")
+    
+    if result['agentic_intent_detected']:
+        print(f"\n⚠️  AGENTIC INTENT DETECTED")
+        if result['requested_actions']:
+            print(f"Requested Actions: {', '.join(result['requested_actions'])}")
+    
     print()
     
     if result['analysis']:

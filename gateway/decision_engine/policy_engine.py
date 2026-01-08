@@ -11,14 +11,16 @@ class PolicyEngine:
     
     def __init__(self):
         self.risk_weights = {
-            "hidden_content_analyzer": 0.3,
-            "prompt_injection_detector": 0.4,
-            "exfiltration_detector": 0.3,
+            "hidden_content_analyzer": 0.2,
+            "prompt_injection_detector": 0.25,
+            "exfiltration_detector": 0.25,
+            "agentic_intent_detector": 0.3,
         }
         
         self.decision_thresholds = {
             "block": 0.8,
-            "sanitize": 0.5,
+            "require_approval": 0.5,
+            "sanitize": 0.3,
             "allow": 0.0,
         }
     
@@ -32,7 +34,7 @@ class PolicyEngine:
         
         overall_risk, risk_score = self._calculate_overall_risk(analysis_results)
         
-        decision = self._determine_decision(overall_risk, risk_score)
+        decision = self._determine_decision(overall_risk, risk_score, analysis_results)
         
         restrictions = self._determine_restrictions(overall_risk, analysis_results)
         
@@ -83,13 +85,22 @@ class PolicyEngine:
         
         for result in results:
             weight = self.risk_weights.get(result.module_name, 0.2)
-            risk_value = risk_values[result.risk_level]
-            weighted_risk = risk_value * result.confidence * weight
+            
+            risk_score = result.risk_score if result.risk_score > 0 else risk_values[result.risk_level]
+            weighted_risk = risk_score * result.confidence * weight
             
             weighted_sum += weighted_risk
             total_weight += weight
         
         risk_score = weighted_sum / total_weight if total_weight > 0 else 0.0
+        
+        agentic_result = next(
+            (r for r in results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        
+        if agentic_result and agentic_result.risk_level != RiskLevel.SAFE:
+            risk_score = max(risk_score, 0.5)
         
         if risk_score >= 0.8:
             overall_risk = RiskLevel.CRITICAL
@@ -97,7 +108,7 @@ class PolicyEngine:
             overall_risk = RiskLevel.HIGH
         elif risk_score >= 0.4:
             overall_risk = RiskLevel.MEDIUM
-        elif risk_score >= 0.2:
+        elif risk_score >= 0.15:
             overall_risk = RiskLevel.LOW
         else:
             overall_risk = RiskLevel.SAFE
@@ -107,14 +118,41 @@ class PolicyEngine:
     def _determine_decision(
         self, 
         risk_level: RiskLevel, 
-        risk_score: float
+        risk_score: float,
+        analysis_results: List[AnalysisResult]
     ) -> SecurityDecision:
         """Determine action based on risk assessment."""
+        
+        agentic_result = next(
+            (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        
+        has_agentic_intent = (
+            agentic_result and 
+            agentic_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]
+        )
+        
+        if has_agentic_intent:
+            has_bypass = any(
+                f.get('type') == 'permission_bypass'
+                for f in agentic_result.findings
+            )
+            
+            if has_bypass or risk_score >= 0.8:
+                return SecurityDecision.BLOCK
+            elif risk_score >= 0.4:
+                return SecurityDecision.REQUIRE_APPROVAL
+            else:
+                return SecurityDecision.SANITIZE
         
         if risk_level == RiskLevel.CRITICAL or risk_score >= self.decision_thresholds["block"]:
             return SecurityDecision.BLOCK
         
-        elif risk_level == RiskLevel.HIGH or risk_score >= self.decision_thresholds["sanitize"]:
+        elif risk_score >= self.decision_thresholds["require_approval"]:
+            return SecurityDecision.REQUIRE_APPROVAL
+        
+        elif risk_score >= self.decision_thresholds["sanitize"]:
             return SecurityDecision.SANITIZE
         
         else:
@@ -141,14 +179,53 @@ class PolicyEngine:
             for r in results
         )
         
-        if risk_level == RiskLevel.CRITICAL:
+        agentic_result = next(
+            (r for r in results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        
+        has_agentic_intent = (
+            agentic_result and 
+            agentic_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]
+        )
+        
+        has_permission_bypass = False
+        if agentic_result:
+            has_permission_bypass = any(
+                f.get('type') == 'permission_bypass'
+                for f in agentic_result.findings
+            )
+        
+        if has_permission_bypass:
+            restrictions.mode = "ACTION_DISABLED"
+            restrictions.allow_web_access = False
+            restrictions.allow_file_write = False
+            restrictions.allow_code_execution = False
+            restrictions.allow_tool_use = False
+            restrictions.max_output_length = 500
+            restrictions.requires_approval = True
+            restrictions.approval_reason = "Permission bypass detected - all actions disabled"
+        
+        elif risk_level == RiskLevel.CRITICAL:
+            restrictions.mode = "ACTION_DISABLED"
             restrictions.allow_web_access = False
             restrictions.allow_file_write = False
             restrictions.allow_code_execution = False
             restrictions.allow_tool_use = False
             restrictions.max_output_length = 500
         
+        elif has_agentic_intent:
+            restrictions.mode = "APPROVAL_REQUIRED"
+            restrictions.allow_web_access = False
+            restrictions.allow_file_write = False
+            restrictions.allow_code_execution = False
+            restrictions.allow_tool_use = False
+            restrictions.max_output_length = 1000
+            restrictions.requires_approval = True
+            restrictions.approval_reason = "Agentic action request requires human approval"
+        
         elif risk_level == RiskLevel.HIGH:
+            restrictions.mode = "RESTRICTED"
             restrictions.allow_web_access = not has_exfiltration
             restrictions.allow_file_write = False
             restrictions.allow_code_execution = False
@@ -156,6 +233,7 @@ class PolicyEngine:
             restrictions.max_output_length = 1000
         
         elif risk_level == RiskLevel.MEDIUM:
+            restrictions.mode = "READ_ONLY"
             restrictions.allow_web_access = not has_exfiltration
             restrictions.allow_file_write = False
             restrictions.allow_code_execution = False
@@ -225,10 +303,40 @@ class PolicyEngine:
             ""
         ]
         
+        agentic_result = next(
+            (r for r in results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        
+        if agentic_result and agentic_result.risk_level != RiskLevel.SAFE:
+            reasoning_parts.append("AGENTIC INTENT DETECTED:")
+            reasoning_parts.append(f"- {agentic_result.details}")
+            
+            requested_actions = []
+            for finding in agentic_result.findings:
+                if finding.get('type') == 'action_request':
+                    requested_actions.append(finding.get('action'))
+            
+            if requested_actions:
+                reasoning_parts.append(f"- Requested actions: {', '.join(set(requested_actions))}")
+            
+            has_bypass = any(
+                f.get('type') == 'permission_bypass'
+                for f in agentic_result.findings
+            )
+            
+            if has_bypass:
+                reasoning_parts.append("- CRITICAL: Attempts to bypass user permission/approval")
+            
+            reasoning_parts.append("")
+        
         critical_findings = []
         high_findings = []
         
         for result in results:
+            if result.module_name == "agentic_intent_detector":
+                continue
+            
             if result.risk_level == RiskLevel.CRITICAL:
                 critical_findings.append(
                     f"- {result.module_name}: {result.details}"
@@ -250,7 +358,11 @@ class PolicyEngine:
         
         if decision == SecurityDecision.BLOCK:
             reasoning_parts.append(
-                "Action: Content blocked due to high-severity security threats."
+                "Action: Content BLOCKED due to critical security threats."
+            )
+        elif decision == SecurityDecision.REQUIRE_APPROVAL:
+            reasoning_parts.append(
+                "Action: HUMAN APPROVAL REQUIRED - agentic action detected without user consent."
             )
         elif decision == SecurityDecision.SANITIZE:
             reasoning_parts.append(
@@ -271,6 +383,9 @@ class PolicyEngine:
         
         restricted = []
         
+        if restrictions.mode != "NORMAL":
+            restricted.append(f"mode:{restrictions.mode}")
+        
         if not restrictions.allow_web_access:
             restricted.append("web_access")
         if not restrictions.allow_file_write:
@@ -281,5 +396,7 @@ class PolicyEngine:
             restricted.append("tool_use")
         if restrictions.max_output_length:
             restricted.append(f"output_limited_to_{restrictions.max_output_length}")
+        if restrictions.requires_approval:
+            restricted.append("requires_human_approval")
         
         return restricted

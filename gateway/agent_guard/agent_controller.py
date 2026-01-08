@@ -17,9 +17,13 @@ class AgentController:
         
         self.active_restrictions[session_id] = restrictions
         
+        enforcement_status = "ENFORCED" if restrictions.mode != "NORMAL" else "STANDARD"
+        
         return {
             "session_id": session_id,
             "restrictions_applied": True,
+            "enforcement_status": enforcement_status,
+            "mode": restrictions.mode,
             "policy": self._serialize_restrictions(restrictions)
         }
     
@@ -33,7 +37,7 @@ class AgentController:
         action_type: str, 
         action_params: Dict = None
     ) -> tuple[bool, str]:
-        """Check if an action is allowed under current restrictions."""
+        """Check if an action is allowed under current restrictions. ENFORCES restrictions."""
         
         restrictions = self.active_restrictions.get(session_id)
         
@@ -41,6 +45,18 @@ class AgentController:
             return True, "No restrictions active"
         
         action_params = action_params or {}
+        
+        if restrictions.mode == "ACTION_DISABLED":
+            if action_type not in ["read", "query", "generate_output"]:
+                return False, f"ACTION_DISABLED mode: {action_type} is not allowed"
+        
+        if restrictions.mode == "READ_ONLY":
+            if action_type in ["file_write", "code_execution", "tool_use", "web_request"]:
+                return False, f"READ_ONLY mode: {action_type} is not allowed"
+        
+        if restrictions.mode == "APPROVAL_REQUIRED":
+            if action_type in ["file_write", "code_execution", "tool_use", "web_request", "send_email"]:
+                return False, f"APPROVAL_REQUIRED mode: {action_type} requires human approval - {restrictions.approval_reason}"
         
         if action_type == "web_request":
             if not restrictions.allow_web_access:
@@ -86,30 +102,62 @@ class AgentController:
             return ""
         
         prompt_parts = [
-            "SECURITY RESTRICTIONS ACTIVE:",
-            ""
+            "=" * 60,
+            "SECURITY RESTRICTIONS ACTIVE",
+            "=" * 60,
         ]
         
-        if not restrictions.allow_web_access:
-            prompt_parts.append("- Web access is DISABLED. Do not attempt to make HTTP requests or access external URLs.")
+        if restrictions.mode != "NORMAL":
+            prompt_parts.append(f"MODE: {restrictions.mode}")
+            prompt_parts.append("")
         
-        if not restrictions.allow_file_write:
-            prompt_parts.append("- File write operations are DISABLED. Do not attempt to save, create, or modify files.")
+        if restrictions.mode == "ACTION_DISABLED":
+            prompt_parts.append("ALL AUTONOMOUS ACTIONS ARE DISABLED.")
+            prompt_parts.append("You are in READ-ONLY mode. You can only:")
+            prompt_parts.append("- Read and analyze information")
+            prompt_parts.append("- Answer questions")
+            prompt_parts.append("- Provide explanations")
+            prompt_parts.append("")
+            prompt_parts.append("You CANNOT:")
+            prompt_parts.append("- Execute code")
+            prompt_parts.append("- Make web requests")
+            prompt_parts.append("- Write files")
+            prompt_parts.append("- Use tools or call APIs")
+            prompt_parts.append("- Send emails or messages")
+            prompt_parts.append("- Perform any side-effecting actions")
         
-        if not restrictions.allow_code_execution:
-            prompt_parts.append("- Code execution is DISABLED. Do not generate or execute code snippets.")
+        elif restrictions.mode == "APPROVAL_REQUIRED":
+            prompt_parts.append("HUMAN APPROVAL REQUIRED FOR ACTIONS.")
+            prompt_parts.append(f"Reason: {restrictions.approval_reason}")
+            prompt_parts.append("")
+            prompt_parts.append("You must inform the user that any action requires their explicit approval.")
         
-        if not restrictions.allow_tool_use:
-            prompt_parts.append("- Tool usage is DISABLED. Only respond with direct text answers.")
+        elif restrictions.mode == "READ_ONLY":
+            prompt_parts.append("READ-ONLY MODE ACTIVE.")
+            prompt_parts.append("You cannot perform write operations or side-effecting actions.")
+        
+        else:
+            if not restrictions.allow_web_access:
+                prompt_parts.append("- Web access is DISABLED. Do not attempt to make HTTP requests or access external URLs.")
+            
+            if not restrictions.allow_file_write:
+                prompt_parts.append("- File write operations are DISABLED. Do not attempt to save, create, or modify files.")
+            
+            if not restrictions.allow_code_execution:
+                prompt_parts.append("- Code execution is DISABLED. Do not generate or execute code snippets.")
+            
+            if not restrictions.allow_tool_use:
+                prompt_parts.append("- Tool usage is DISABLED. Only respond with direct text answers.")
         
         if restrictions.max_output_length:
             prompt_parts.append(f"- Output length is LIMITED to {restrictions.max_output_length} characters.")
         
         if restrictions.blocked_patterns:
-            prompt_parts.append(f"- The following patterns are BLOCKED: {', '.join(restrictions.blocked_patterns[:3])}")
+            prompt_parts.append(f"- Blocked patterns: {', '.join(restrictions.blocked_patterns[:3])}")
         
         prompt_parts.append("")
-        prompt_parts.append("Operate within these restrictions. Any attempt to bypass them will be logged.")
+        prompt_parts.append("Any attempt to bypass these restrictions will be logged and blocked.")
+        prompt_parts.append("=" * 60)
         
         return "\n".join(prompt_parts)
     
@@ -121,6 +169,7 @@ class AgentController:
     def _serialize_restrictions(self, restrictions: AgentRestrictions) -> Dict:
         """Convert restrictions to dictionary format."""
         return {
+            "mode": restrictions.mode,
             "allow_web_access": restrictions.allow_web_access,
             "allow_file_write": restrictions.allow_file_write,
             "allow_code_execution": restrictions.allow_code_execution,
@@ -128,4 +177,6 @@ class AgentController:
             "max_output_length": restrictions.max_output_length,
             "allowed_domains": restrictions.allowed_domains,
             "blocked_patterns": restrictions.blocked_patterns,
+            "requires_approval": restrictions.requires_approval,
+            "approval_reason": restrictions.approval_reason,
         }

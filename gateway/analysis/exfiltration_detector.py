@@ -78,7 +78,8 @@ class ExfiltrationDetector:
                 risk_level=RiskLevel.SAFE,
                 confidence=0.85,
                 findings=[],
-                details="No data exfiltration or propagation patterns detected."
+                details="No data exfiltration or propagation patterns detected.",
+                risk_score=0.0
             )
         
         avg_risk = sum(risk_scores) / len(risk_scores)
@@ -89,7 +90,8 @@ class ExfiltrationDetector:
             risk_level=risk_level,
             confidence=min(0.95, avg_risk + 0.15),
             findings=findings,
-            details=f"Detected {len(findings)} exfiltration/propagation indicators."
+            details=f"Detected {len(findings)} exfiltration/propagation indicators.",
+            risk_score=avg_risk
         )
     
     def _detect_exfiltration(self, text: str) -> List[Dict]:
