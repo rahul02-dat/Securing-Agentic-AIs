@@ -11,6 +11,7 @@ from gateway.analysis.hidden_content_analyzer import HiddenContentAnalyzer
 from gateway.analysis.prompt_injection_detector import PromptInjectionDetector
 from gateway.analysis.exfiltration_detector import ExfiltrationDetector
 from gateway.analysis.agentic_intent_detector import AgenticIntentDetector
+from gateway.analysis.intent_classifier import IntentClassifier
 from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
 from shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
@@ -22,6 +23,7 @@ class UnseenLinkGuard:
     
     def __init__(self):
         self.input_handler = LinkInputHandler()
+        self.intent_classifier = IntentClassifier()
         self.hidden_analyzer = HiddenContentAnalyzer()
         self.injection_detector = PromptInjectionDetector()
         self.exfiltration_detector = ExfiltrationDetector()
@@ -58,6 +60,12 @@ class UnseenLinkGuard:
             )
         
         analysis_results = []
+        
+        intent_analysis = self.intent_classifier.analyze(
+            extracted.visible_text,
+            extracted.hidden_elements
+        )
+        analysis_results.append(intent_analysis)
         
         hidden_analysis = self.hidden_analyzer.analyze(
             extracted.visible_text,
@@ -105,7 +113,8 @@ class UnseenLinkGuard:
         
         restrictions = self.policy_engine._determine_restrictions(
             assessment.overall_risk,
-            analysis_results
+            analysis_results,
+            assessment.primary_intent
         )
         
         apply_result = self.agent_controller.apply_restrictions(session_id, restrictions)
@@ -128,7 +137,8 @@ class UnseenLinkGuard:
                     "risk": r.risk_level.value,
                     "confidence": r.confidence,
                     "details": r.details,
-                    "risk_score": r.risk_score
+                    "risk_score": r.risk_score,
+                    "detected_intent": r.detected_intent.value if r.detected_intent else None
                 }
                 for r in analysis_results
             ],
@@ -139,7 +149,9 @@ class UnseenLinkGuard:
                 "agentic_intent_detected": assessment.agentic_intent_detected,
                 "requested_actions": assessment.requested_actions,
                 "enforcement_mode": restrictions.mode,
-                "requires_approval": restrictions.requires_approval
+                "requires_approval": restrictions.requires_approval,
+                "primary_intent": assessment.primary_intent.value,
+                "intent_confidence": assessment.intent_confidence
             }
         )
         
@@ -157,6 +169,8 @@ class UnseenLinkGuard:
             "decision": assessment.decision.value,
             "risk_level": assessment.overall_risk.value,
             "risk_score": round(assessment.risk_score, 3),
+            "primary_intent": assessment.primary_intent.value,
+            "intent_confidence": round(assessment.intent_confidence, 3),
             "agentic_intent_detected": assessment.agentic_intent_detected,
             "requested_actions": assessment.requested_actions,
             "content": {
@@ -171,7 +185,8 @@ class UnseenLinkGuard:
                     "confidence": round(r.confidence, 3),
                     "findings_count": len(r.findings),
                     "details": r.details,
-                    "risk_score": round(r.risk_score, 3)
+                    "risk_score": round(r.risk_score, 3),
+                    "detected_intent": r.detected_intent.value if r.detected_intent else None
                 }
                 for r in assessment.analysis_results
             ],
@@ -209,7 +224,6 @@ def main():
         process_and_display_result(guard, stdin_content)
         return
     
-    # Check if input.txt exists in current directory
     input_file_path = Path("input.txt")
     if input_file_path.exists():
         try:
@@ -267,6 +281,7 @@ def display_result(result):
     print(f"Decision: {result['decision'].upper()}")
     print(f"Risk Level: {result['risk_level'].upper()}")
     print(f"Risk Score: {result['risk_score']}")
+    print(f"Primary Intent: {result['primary_intent'].upper()} (confidence: {result['intent_confidence']})")
     
     if result['agentic_intent_detected']:
         print(f"\n⚠️  AGENTIC INTENT DETECTED")

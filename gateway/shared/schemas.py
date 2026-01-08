@@ -19,6 +19,14 @@ class SecurityDecision(Enum):
     REQUIRE_APPROVAL = "require_approval"
 
 
+class ContentIntent(Enum):
+    DESCRIPTIVE = "descriptive"
+    INSTRUCTIONAL = "instructional"
+    CONDITIONAL_INSTRUCTIONAL = "conditional_instructional"
+    AMBIGUOUS = "ambiguous"
+    MALICIOUS = "malicious"
+
+
 @dataclass
 class ContentBlock:
     """Represents extracted content with metadata."""
@@ -37,6 +45,7 @@ class AnalysisResult:
     findings: List[Dict]
     details: str
     risk_score: float = 0.0
+    detected_intent: Optional[ContentIntent] = None
 
 
 @dataclass
@@ -56,6 +65,8 @@ class SecurityAssessment:
     reasoning: str
     agentic_intent_detected: bool = False
     requested_actions: List[str] = field(default_factory=list)
+    primary_intent: ContentIntent = ContentIntent.DESCRIPTIVE
+    intent_confidence: float = 0.0
 
 
 @dataclass

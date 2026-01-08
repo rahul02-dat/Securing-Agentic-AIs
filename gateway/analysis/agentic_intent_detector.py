@@ -25,6 +25,9 @@ class AgenticIntentDetector:
             (r'\bquery\s+(the\s+)?(database|db|sql)', 'query_database', 0.75),
             (r'\bschedule\s+(task|job|cron)', 'schedule_task', 0.85),
             (r'\btrigger\s+(webhook|event|notification)', 'trigger_event', 0.85),
+            (r'\bfetch\s+(from|data\s+from)\s+https?://', 'fetch_url', 0.8),
+            (r'\brender\s+(the\s+)?(url|link|page)', 'render_url', 0.75),
+            (r'\bnavigate\s+to\s+https?://', 'navigate', 0.8),
         ]
         
         self.tool_access_patterns = [
@@ -37,9 +40,9 @@ class AgenticIntentDetector:
         ]
         
         self.autonomy_patterns = [
-            r'\bwithout\s+(asking|permission|confirmation|approval)',
-            r'\bdon\'?t\s+(ask|confirm|wait)',
-            r'\bno\s+need\s+to\s+(ask|confirm)',
+            r'\bwithout\s+(asking|permission|confirmation|approval|telling)',
+            r'\bdon\'?t\s+(ask|confirm|wait|tell)',
+            r'\bno\s+need\s+to\s+(ask|confirm|notify)',
             r'\bautomatic(ally)?',
             r'\bautonomous(ly)?',
             r'\bon\s+your\s+own',
@@ -47,15 +50,26 @@ class AgenticIntentDetector:
             r'\bjust\s+do\s+it',
             r'\bsilently',
             r'\bin\s+the\s+background',
-            r'\bwithout\s+telling',
+            r'\bwithout\s+(user\s+)?(interaction|involvement)',
+            r'\bdirectly',
+            r'\bimmediately',
         ]
         
         self.permission_bypass_patterns = [
-            r'\bskip\s+(the\s+)?(confirmation|approval|permission)',
-            r'\bbypass\s+(the\s+)?(check|confirmation|approval)',
-            r'\bignore\s+(the\s+)?(warning|prompt|confirmation)',
-            r'\bsuppress\s+(the\s+)?(prompt|confirmation|dialog)',
-            r'\bno\s+(user\s+)?(confirmation|approval|permission)\s+needed',
+            r'\bskip\s+(the\s+)?(confirmation|approval|permission|check)',
+            r'\bbypass\s+(the\s+)?(check|confirmation|approval|validation)',
+            r'\bignore\s+(the\s+)?(warning|prompt|confirmation|safety)',
+            r'\bsuppress\s+(the\s+)?(prompt|confirmation|dialog|warning)',
+            r'\bno\s+(user\s+)?(confirmation|approval|permission)\s+(needed|required)',
+            r'\boverride\s+(the\s+)?(safety|security|restriction)',
+        ]
+        
+        self.link_action_patterns = [
+            r'\bappend\s+(data|response|output|result)\s+to\s+(the\s+)?(url|link)',
+            r'\binclude\s+(in|within)\s+(the\s+)?url\s+(parameter|query)',
+            r'\badd\s+to\s+(the\s+)?query\s+string',
+            r'\bencode\s+in(to)?\s+(the\s+)?(url|link)',
+            r'\btransmit\s+(via|through)\s+(the\s+)?(url|request)',
         ]
     
     def analyze(self, visible_text: str, hidden_elements: List[str]) -> AnalysisResult:
@@ -89,11 +103,17 @@ class AgenticIntentDetector:
             findings.extend(bypass_findings)
             max_risk = max(max_risk, 0.95)
         
+        link_action_findings = self._detect_link_actions(all_content_lower)
+        if link_action_findings:
+            findings.extend(link_action_findings)
+            max_risk = max(max_risk, 0.9)
+        
         combined_risk = self._calculate_combined_risk(
             has_actions=bool(action_findings),
             has_tool_access=bool(tool_findings),
             has_autonomy=bool(autonomy_findings),
             has_bypass=bool(bypass_findings),
+            has_link_actions=bool(link_action_findings),
             base_risk=max_risk
         )
         
@@ -197,12 +217,30 @@ class AgenticIntentDetector:
         
         return findings
     
+    def _detect_link_actions(self, text: str) -> List[Dict]:
+        """Detect link-based action patterns."""
+        findings = []
+        
+        for pattern in self.link_action_patterns:
+            matches = list(re.finditer(pattern, text, re.IGNORECASE))
+            if matches:
+                for match in matches:
+                    findings.append({
+                        "type": "link_action",
+                        "matched_text": match.group(0),
+                        "severity": "critical",
+                        "description": "Link-based action or data exfiltration detected"
+                    })
+        
+        return findings
+    
     def _calculate_combined_risk(
         self,
         has_actions: bool,
         has_tool_access: bool,
         has_autonomy: bool,
         has_bypass: bool,
+        has_link_actions: bool,
         base_risk: float
     ) -> float:
         """Calculate cumulative risk score based on detected patterns."""
@@ -221,6 +259,9 @@ class AgenticIntentDetector:
         if has_bypass:
             risk += 0.35
         
+        if has_link_actions:
+            risk += 0.3
+        
         if has_actions and has_autonomy:
             risk += 0.15
         
@@ -229,6 +270,9 @@ class AgenticIntentDetector:
         
         if has_tool_access and has_autonomy:
             risk += 0.1
+        
+        if has_link_actions and has_actions:
+            risk += 0.15
         
         return min(1.0, risk)
     
