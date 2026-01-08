@@ -1,6 +1,6 @@
 import re
 from typing import List, Tuple, Optional
-from shared.schemas import (
+from gateway.shared.schemas import (
     AnalysisResult, RiskLevel, SecurityDecision, 
     AgentRestrictions, SecurityAssessment
 )

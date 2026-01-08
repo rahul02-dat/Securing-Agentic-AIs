@@ -1,5 +1,5 @@
 from typing import Dict, Optional
-from shared.schemas import AgentRestrictions, SecurityDecision
+from gateway.shared.schemas import AgentRestrictions, SecurityDecision
 
 
 class AgentController:

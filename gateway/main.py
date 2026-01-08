@@ -193,78 +193,77 @@ def main():
     
     if len(sys.argv) > 1:
         input_data = " ".join(sys.argv[1:])
-    else:
-        print("Enter URL or text to analyze (or 'quit' to exit):")
-        print()
-        
-        while True:
-            try:
-                input_data = input("> ").strip()
-                
-                if input_data.lower() in ['quit', 'exit', 'q']:
-                    print("\nExiting UnseenLinkGuard. Stay secure!")
-                    break
-                
-                if not input_data:
-                    continue
-                
-                print("\n" + "-" * 60)
-                print("Processing input...")
-                print("-" * 60 + "\n")
-                
-                result = guard.process_input(input_data)
-                
-                print(f"Decision: {result['decision'].upper()}")
-                print(f"Risk Level: {result['risk_level'].upper()}")
-                print(f"Risk Score: {result['risk_score']}")
-                
-                if result['agentic_intent_detected']:
-                    print(f"\n⚠️  AGENTIC INTENT DETECTED")
-                    if result['requested_actions']:
-                        print(f"Requested Actions: {', '.join(result['requested_actions'])}")
-                
-                print()
-                
-                if result['analysis']:
-                    print("Analysis Results:")
-                    for analysis in result['analysis']:
-                        print(f"  - {analysis['module']}: {analysis['risk']} "
-                              f"(confidence: {analysis['confidence']}, "
-                              f"findings: {analysis['findings_count']}, "
-                              f"risk_score: {analysis['risk_score']})")
-                    print()
-                
-                if result['restrictions']:
-                    print("Restrictions Applied:")
-                    for restriction in result['restrictions']:
-                        print(f"  - {restriction}")
-                    print()
-                
-                print("Reasoning:")
-                print(result['reasoning'])
-                print()
-                
-                if result['content']['sanitized']:
-                    print("Sanitized Content:")
-                    print(result['content']['sanitized'][:200] + "..." 
-                          if len(result['content']['sanitized']) > 200 
-                          else result['content']['sanitized'])
-                    print()
-                
-                print("=" * 60)
-                print()
-                
-            except KeyboardInterrupt:
-                print("\n\nExiting UnseenLinkGuard. Stay secure!")
-                break
-            except Exception as e:
-                print(f"\nError: {str(e)}")
-                print()
-        
+        process_and_display_result(guard, input_data)
         return
     
-    result = guard.process_input(input_data)
+    if not sys.stdin.isatty():
+        stdin_content = sys.stdin.read().strip()
+        
+        if not stdin_content:
+            print("Error: No input provided via stdin", file=sys.stderr)
+            sys.exit(1)
+        
+        print("Processing input from stdin...")
+        print("-" * 60 + "\n")
+        
+        process_and_display_result(guard, stdin_content)
+        return
     
+    # Check if input.txt exists in current directory
+    input_file_path = Path("input.txt")
+    if input_file_path.exists():
+        try:
+            file_content = input_file_path.read_text().strip()
+            if file_content:
+                print("Processing input from input.txt...")
+                print("-" * 60 + "\n")
+                process_and_display_result(guard, file_content)
+                return
+        except Exception as e:
+            print(f"Error reading input.txt: {str(e)}", file=sys.stderr)
+            sys.exit(1)
+    
+    print("Enter URL or text to analyze (or 'quit' to exit):")
+    print()
+    
+    while True:
+        try:
+            input_data = input("> ").strip()
+            
+            if input_data.lower() in ['quit', 'exit', 'q']:
+                print("\nExiting UnseenLinkGuard. Stay secure!")
+                break
+            
+            if not input_data:
+                continue
+            
+            print("\n" + "-" * 60)
+            print("Processing input...")
+            print("-" * 60 + "\n")
+            
+            result = guard.process_input(input_data)
+            display_result(result)
+            
+        except KeyboardInterrupt:
+            print("\n\nExiting UnseenLinkGuard. Stay secure!")
+            break
+        except Exception as e:
+            print(f"\nError: {str(e)}")
+            print()
+
+
+def process_and_display_result(guard, input_data):
+    """Process input and display result (for non-interactive mode)."""
+    try:
+        result = guard.process_input(input_data)
+        display_result(result)
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        sys.exit(1)
+
+
+def display_result(result):
+    """Display formatted result output."""
     print(f"Decision: {result['decision'].upper()}")
     print(f"Risk Level: {result['risk_level'].upper()}")
     print(f"Risk Score: {result['risk_score']}")
@@ -279,8 +278,10 @@ def main():
     if result['analysis']:
         print("Analysis Results:")
         for analysis in result['analysis']:
-            print(f"  {analysis['module']}: {analysis['risk']} "
-                  f"(confidence: {analysis['confidence']})")
+            print(f"  - {analysis['module']}: {analysis['risk']} "
+                  f"(confidence: {analysis['confidence']}, "
+                  f"findings: {analysis['findings_count']}, "
+                  f"risk_score: {analysis['risk_score']})")
         print()
     
     if result['restrictions']:
@@ -289,8 +290,18 @@ def main():
             print(f"  - {restriction}")
         print()
     
-    print("Full Report:")
+    print("Reasoning:")
     print(result['reasoning'])
+    print()
+    
+    if result['content']['sanitized']:
+        sanitized = result['content']['sanitized']
+        print("Sanitized Content:")
+        print(sanitized[:200] + "..." if len(sanitized) > 200 else sanitized)
+        print()
+    
+    print("=" * 60)
+    print()
 
 
 if __name__ == "__main__":

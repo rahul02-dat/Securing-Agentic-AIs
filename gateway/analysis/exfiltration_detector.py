@@ -1,7 +1,7 @@
 import re
 from typing import List, Dict
 from urllib.parse import urlparse, parse_qs
-from shared.schemas import AnalysisResult, RiskLevel
+from gateway.shared.schemas import AnalysisResult, RiskLevel
 
 
 class ExfiltrationDetector:

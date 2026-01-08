@@ -25,6 +25,21 @@ class LinkInputHandler:
             r'<!--.*?-->',
             r'<\s*noscript[^>]*>.*?</\s*noscript\s*>',
         ]
+        
+        # Patterns for CSS-based hiding
+        self.css_hiding_patterns = [
+            r'opacity\s*:\s*0',
+            r'display\s*:\s*none',
+            r'visibility\s*:\s*hidden',
+            r'height\s*:\s*0',
+            r'width\s*:\s*0',
+            r'font-size\s*:\s*0',
+            r'text-indent\s*:\s*-?[0-9]+',
+            r'clip\s*:\s*rect\(0',
+            r'position\s*:\s*absolute.*?(left|right|top|bottom)\s*:\s*-',
+            r'color\s*:\s*transparent',
+            r'background-color\s*:\s*transparent',
+        ]
     
     def process_input(self, input_data: str, input_type: str = "auto") -> ExtractedContent:
         """Process URL or raw text and extract content."""
@@ -117,27 +132,63 @@ class LinkInputHandler:
         """Extract hidden elements, comments, and obfuscated content."""
         hidden = []
         
+        # Extract from suspicious patterns (scripts, iframes, noscripts, comments)
         for pattern in self.suspicious_patterns:
             matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
             hidden.extend(matches)
         
-        for element in soup.find_all(style=True):
+        # Check all elements with style attributes for CSS-based hiding
+        all_elements_with_styles = soup.find_all(style=True)
+        for element in all_elements_with_styles:
             style = element.get('style', '')
-            if 'display:none' in style.replace(' ', '') or 'visibility:hidden' in style.replace(' ', ''):
+            # Normalize whitespace for easier matching
+            normalized_style = style.replace(' ', '').lower()
+            
+            # Check each hiding pattern
+            is_hidden = False
+            for hiding_pattern in self.css_hiding_patterns:
+                if re.search(hiding_pattern, normalized_style, re.IGNORECASE):
+                    is_hidden = True
+                    break
+            
+            if is_hidden:
                 hidden.append(str(element))
         
+        # Check for elements with hidden classes
         for element in soup.find_all(class_=True):
             classes = element.get('class', [])
             if any('hidden' in c.lower() for c in classes):
                 hidden.append(str(element))
         
+        # Extract HTML comments
         comments = soup.find_all(string=lambda text: isinstance(text, str) and text.strip().startswith('<!--'))
         hidden.extend([str(c) for c in comments])
         
-        zero_size_elements = soup.find_all(style=re.compile(r'(width|height)\s*:\s*0'))
+        # Check for zero-size elements
+        zero_size_elements = soup.find_all(style=re.compile(r'(width|height)\s*:\s*0', re.IGNORECASE))
         hidden.extend([str(e) for e in zero_size_elements])
         
-        return hidden
+        # Check for overflow hidden with text-indent or other text-hiding techniques
+        for element in soup.find_all():
+            style = element.get('style', '')
+            if style:
+                normalized = style.replace(' ', '').lower()
+                # Look for text-indent with large negative values
+                if re.search(r'text-indent\s*:\s*-\d+', normalized):
+                    hidden.append(str(element))
+                # Look for position absolute with negative offsets
+                if re.search(r'position\s*:\s*absolute', normalized) and re.search(r'(left|right|top|bottom)\s*:\s*-\d+', normalized):
+                    hidden.append(str(element))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_hidden = []
+        for item in hidden:
+            if item not in seen:
+                seen.add(item)
+                unique_hidden.append(item)
+        
+        return unique_hidden
     
     def _extract_metadata(self, soup, url: str) -> dict:
         """Extract metadata from HTML."""

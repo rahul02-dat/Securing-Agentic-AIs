@@ -1,6 +1,6 @@
 import re
 from typing import List, Dict
-from shared.schemas import AnalysisResult, RiskLevel
+from gateway.shared.schemas import AnalysisResult, RiskLevel
 
 
 class HiddenContentAnalyzer:
