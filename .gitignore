@@ -2,3 +2,9 @@ env/
 __pycache__/
 logs/
 input.txt
+*.pdf
+*.xlsx
+*.docx
+*.pptx
+*.csv
+SUPPORTED_FORMATS.md
