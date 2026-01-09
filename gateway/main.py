@@ -1,10 +1,40 @@
 import sys
 import os
 import uuid
+import csv
 from datetime import datetime
 from pathlib import Path
+from io import StringIO
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Try to import PDF extraction library
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
+# Try to import Excel handling libraries
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+# Try to import Word document handling library
+try:
+    from docx import Document as DocxDocument
+    HAS_PYTHON_DOCX = True
+except ImportError:
+    HAS_PYTHON_DOCX = False
+
+# Try to import PowerPoint handling library
+try:
+    from pptx import Presentation
+    HAS_PYTHON_PPTX = True
+except ImportError:
+    HAS_PYTHON_PPTX = False
 
 from gateway.ingestion.link_input_handler import LinkInputHandler
 from gateway.analysis.hidden_content_analyzer import HiddenContentAnalyzer
@@ -196,6 +226,157 @@ class UnseenLinkGuard:
         }
 
 
+def read_file_content(file_path: Path) -> str:
+    """
+    Read file content, handling different file types.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        File content as string
+        
+    Raises:
+        ValueError: If file type is not supported or cannot be read
+    """
+    suffix = file_path.suffix.lower()
+    
+    # Text files
+    text_extensions = {'.txt', '.md', '.html', '.xml', '.csv', '.json', '.py', '.js', '.yaml', '.yml', '.log'}
+    if suffix in text_extensions:
+        try:
+            return file_path.read_text(encoding='utf-8').strip()
+        except UnicodeDecodeError:
+            # Try with latin-1 as fallback
+            try:
+                return file_path.read_text(encoding='latin-1').strip()
+            except Exception as e:
+                raise ValueError(f"Cannot read text file {file_path}: {str(e)}")
+    
+    # CSV files
+    elif suffix == '.csv':
+        try:
+            content = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for row_num, row in enumerate(reader, 1):
+                    content.append(f"Row {row_num}: {' | '.join(row)}")
+            result = '\n'.join(content).strip()
+            if not result:
+                raise ValueError("CSV file is empty")
+            return result
+        except Exception as e:
+            raise ValueError(f"Error reading CSV file {file_path}: {str(e)}")
+    
+    # Excel files (.xlsx, .xls)
+    elif suffix in {'.xlsx', '.xls'}:
+        if not HAS_OPENPYXL:
+            raise ValueError(
+                f"Excel file detected ({file_path}) but openpyxl is not installed. "
+                "Install it with: pip install openpyxl"
+            )
+        try:
+            content = []
+            workbook = openpyxl.load_workbook(file_path)
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                content.append(f"Sheet: {sheet_name}")
+                for row_num, row in enumerate(sheet.iter_rows(values_only=True), 1):
+                    row_values = [str(cell) if cell is not None else "" for cell in row]
+                    content.append(f"Row {row_num}: {' | '.join(row_values)}")
+            result = '\n'.join(content).strip()
+            if not result:
+                raise ValueError("Excel file is empty or contains no readable data")
+            return result
+        except Exception as e:
+            raise ValueError(f"Error reading Excel file {file_path}: {str(e)}")
+    
+    # Word documents (.docx)
+    elif suffix == '.docx':
+        if not HAS_PYTHON_DOCX:
+            raise ValueError(
+                f"Word document detected ({file_path}) but python-docx is not installed. "
+                "Install it with: pip install python-docx"
+            )
+        try:
+            doc = DocxDocument(file_path)
+            content = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    content.append(para.text)
+            # Also extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_values = [cell.text for cell in row.cells]
+                    content.append(' | '.join(row_values))
+            result = '\n'.join(content).strip()
+            if not result:
+                raise ValueError("Word document contains no readable text")
+            return result
+        except Exception as e:
+            raise ValueError(f"Error reading Word document {file_path}: {str(e)}")
+    
+    # PowerPoint presentations (.pptx)
+    elif suffix == '.pptx':
+        if not HAS_PYTHON_PPTX:
+            raise ValueError(
+                f"PowerPoint file detected ({file_path}) but python-pptx is not installed. "
+                "Install it with: pip install python-pptx"
+            )
+        try:
+            prs = Presentation(file_path)
+            content = []
+            for slide_num, slide in enumerate(prs.slides, 1):
+                content.append(f"Slide {slide_num}:")
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        content.append(f"  {shape.text}")
+            result = '\n'.join(content).strip()
+            if not result:
+                raise ValueError("PowerPoint presentation contains no readable text")
+            return result
+        except Exception as e:
+            raise ValueError(f"Error reading PowerPoint file {file_path}: {str(e)}")
+    
+    # PDF files
+    elif suffix == '.pdf':
+        if not HAS_PYPDF:
+            raise ValueError(
+                f"PDF file detected ({file_path}) but pypdf is not installed. "
+                "Install it with: pip install pypdf"
+            )
+        try:
+            text_content = []
+            with open(file_path, 'rb') as f:
+                pdf_reader = pypdf.PdfReader(f)
+                for page_num in range(len(pdf_reader.pages)):
+                    page = pdf_reader.pages[page_num]
+                    text_content.append(page.extract_text())
+            result = '\n'.join(text_content).strip()
+            if not result:
+                raise ValueError("No text could be extracted from the PDF")
+            return result
+        except Exception as e:
+            raise ValueError(f"Error reading PDF file {file_path}: {str(e)}")
+    
+    # Other common file types
+    elif suffix in {'.jpg', '.jpeg', '.png', '.gif', '.img', '.bin', '.zip', '.tar', '.gz'}:
+        raise ValueError(
+            f"Binary file format '{suffix}' is not supported. "
+            "Please provide a text, CSV, Excel, Word, PowerPoint, or PDF file."
+        )
+    
+    # Unknown extension - try as text
+    else:
+        try:
+            return file_path.read_text(encoding='utf-8').strip()
+        except (UnicodeDecodeError, OSError):
+            raise ValueError(
+                f"Unable to read file {file_path}. "
+                "Supported formats: .txt, .md, .html, .csv, .xlsx, .xls, .docx, .pptx, .pdf, and other text files"
+            )
+
+
 def main():
     """CLI entry point."""
     
@@ -207,9 +388,25 @@ def main():
     guard = UnseenLinkGuard()
     
     if len(sys.argv) > 1:
-        input_data = " ".join(sys.argv[1:])
-        process_and_display_result(guard, input_data)
-        return
+        input_arg = " ".join(sys.argv[1:])
+        
+        # Check if argument is a file path
+        file_path = Path(input_arg)
+        if file_path.exists() and file_path.is_file():
+            try:
+                file_content = read_file_content(file_path)
+                if file_content:
+                    print(f"Processing input from file: {file_path}")
+                    print("-" * 60 + "\n")
+                    process_and_display_result(guard, file_content, str(file_path))
+                    return
+            except ValueError as e:
+                print(f"Error: {str(e)}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # Treat as direct input
+            process_and_display_result(guard, input_arg)
+            return
     
     if not sys.stdin.isatty():
         stdin_content = sys.stdin.read().strip()
@@ -227,35 +424,53 @@ def main():
     input_file_path = Path("input.txt")
     if input_file_path.exists():
         try:
-            file_content = input_file_path.read_text().strip()
+            file_content = read_file_content(input_file_path)
             if file_content:
                 print("Processing input from input.txt...")
                 print("-" * 60 + "\n")
-                process_and_display_result(guard, file_content)
+                process_and_display_result(guard, file_content, "input.txt")
                 return
-        except Exception as e:
-            print(f"Error reading input.txt: {str(e)}", file=sys.stderr)
+        except ValueError as e:
+            print(f"Error: {str(e)}", file=sys.stderr)
             sys.exit(1)
     
-    print("Enter URL or text to analyze (or 'quit' to exit):")
+    print("Enter URL, text to analyze, or file path (or 'quit' to exit):")
+    print("Supported file types: .txt, .md, .html, .csv, .xlsx, .xls, .docx, .pptx, .pdf")
     print()
     
     while True:
         try:
-            input_data = input("> ").strip()
+            user_input = input("> ").strip()
             
-            if input_data.lower() in ['quit', 'exit', 'q']:
+            if user_input.lower() in ['quit', 'exit', 'q']:
                 print("\nExiting UnseenLinkGuard. Stay secure!")
                 break
             
-            if not input_data:
+            if not user_input:
+                continue
+            
+            # Check if input is a file path
+            file_path = Path(user_input)
+            if file_path.exists() and file_path.is_file():
+                try:
+                    file_content = read_file_content(file_path)
+                    if file_content:
+                        print("\n" + "-" * 60)
+                        print(f"Processing input from file: {file_path}")
+                        print("-" * 60 + "\n")
+                        result = guard.process_input(file_content)
+                        display_result(result)
+                    else:
+                        print(f"File {file_path} is empty.")
+                except ValueError as e:
+                    print(f"Error: {str(e)}")
                 continue
             
             print("\n" + "-" * 60)
             print("Processing input...")
             print("-" * 60 + "\n")
             
-            result = guard.process_input(input_data)
+            result = guard.process_input(user_input)
             display_result(result)
             
         except KeyboardInterrupt:
@@ -266,9 +481,11 @@ def main():
             print()
 
 
-def process_and_display_result(guard, input_data):
+def process_and_display_result(guard, input_data, source=None):
     """Process input and display result (for non-interactive mode)."""
     try:
+        if source:
+            print(f"File: {source}")
         result = guard.process_input(input_data)
         display_result(result)
     except Exception as e:
