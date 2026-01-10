@@ -1,0 +1,77 @@
+# UnseenLinkGuard Security Configuration
+# Adjust thresholds and weights to tune security vs. usability trade-off
+
+# Risk scoring weights for each analysis module (must sum to ~1.0)
+risk_weights:
+  intent_classifier: 0.30          # Primary intent classification
+  semantic_threat_detector: 0.15   # Semantic similarity analysis
+  hidden_content_analyzer: 0.10    # Hidden elements detection
+  prompt_injection_detector: 0.15  # Regex-based injection patterns
+  exfiltration_detector: 0.10      # Data exfiltration patterns
+  agentic_intent_detector: 0.15    # Autonomous action requests
+  content_deobfuscator: 0.05       # Encoded content analysis
+
+# Decision thresholds (0.0 - 1.0)
+decision_thresholds:
+  block: 0.75                      # Block content above this score
+  require_approval: 0.40           # Require human approval above this score
+  sanitize: 0.20                   # Sanitize content above this score
+  allow: 0.15                      # Allow content below this score (descriptive only)
+
+# Intent-based risk floors (minimum risk for each intent type)
+intent_risk_floors:
+  malicious: 0.95                  # Always critical
+  conditional_instructional: 0.70  # AI-targeted instructions
+  instructional: 0.50              # General instructions
+  ambiguous: 0.30                  # Unclear intent
+  descriptive: 0.00                # Pure description
+
+# Baseline risks for specific content types
+baseline_risks:
+  ocr_extracted: 0.25              # Text from images
+  decoded_content: 0.20            # Decoded obfuscated content
+  hidden_elements: 0.15            # CSS/HTML hidden content
+  conditional_language: 0.35       # "If AI" type patterns
+
+# Semantic similarity settings
+semantic_analysis:
+  enabled: true
+  similarity_threshold: 0.65       # Report matches above this score
+  model_name: "all-MiniLM-L6-v2"  # Embedding model to use
+  
+# De-obfuscation settings
+deobfuscation:
+  max_recursion_depth: 3           # Prevent decode bombs
+  max_decode_size: 1000000         # 1MB limit per decode
+  min_pattern_length: 20           # Minimum chars for detection
+
+# OCR settings
+ocr_analysis:
+  enabled: true
+  supported_formats: ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+  baseline_risk: 0.25              # All OCR content gets this minimum risk
+
+# Enforcement modes
+enforcement:
+  fail_closed: true                # Block on ambiguity
+  strict_intent_enforcement: true  # Instructional intent cannot ALLOW
+  require_approval_for_agentic: true
+  
+# Performance settings
+performance:
+  parallel_execution: true         # Run detectors in parallel
+  max_workers: 5                   # Thread pool size
+  analysis_timeout: 30             # Seconds per analysis
+
+# Logging settings
+logging:
+  level: "INFO"                    # DEBUG, INFO, WARNING, ERROR
+  log_dir: "logs"
+  log_file: "security_events.jsonl"
+  
+# Feature flags
+features:
+  semantic_detection: true
+  active_deobfuscation: true
+  ocr_analysis: true
+  parallel_analysis: true

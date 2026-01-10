@@ -5,31 +5,33 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Try to import PDF extraction library
+# Import PDF extraction library
 try:
     import pypdf
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
 
-# Try to import Excel handling libraries
+# Import Excel handling libraries
 try:
     import openpyxl
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
 
-# Try to import Word document handling library
+# Import Word document handling library
 try:
     from docx import Document as DocxDocument
     HAS_PYTHON_DOCX = True
 except ImportError:
     HAS_PYTHON_DOCX = False
 
-# Try to import PowerPoint handling library
+# Import PowerPoint handling library
 try:
     from pptx import Presentation
     HAS_PYTHON_PPTX = True
@@ -42,35 +44,88 @@ from gateway.analysis.prompt_injection_detector import PromptInjectionDetector
 from gateway.analysis.exfiltration_detector import ExfiltrationDetector
 from gateway.analysis.agentic_intent_detector import AgenticIntentDetector
 from gateway.analysis.intent_classifier import IntentClassifier
+from gateway.analysis.semantic_detector import SemanticThreatDetector
+from gateway.analysis.deobfuscator import ContentDeobfuscator
+from gateway.analysis.ocr_analyzer import OCRContentAnalyzer
 from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
-from shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
-from shared.logging_utils import SecurityLogger
+from gateway.shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
+from gateway.shared.logging_utils import SecurityLogger
+from gateway.shared.config_loader import get_config
 
 
 class UnseenLinkGuard:
-    """Main gateway orchestrator for LLM security."""
+    """
+    Enhanced LLM security gateway with:
+    - Semantic threat detection
+    - Active de-obfuscation
+    - OCR analysis for images
+    - Parallel execution
+    - Intent-first enforcement
+    """
     
     def __init__(self):
+        self.config = get_config()
+        
+        # Core components
         self.input_handler = LinkInputHandler()
+        self.policy_engine = PolicyEngine()
+        self.agent_controller = AgentController()
+        self.logger = SecurityLogger(log_dir=self.config.get('logging', 'log_dir', default='logs'))
+        
+        # Analysis modules
         self.intent_classifier = IntentClassifier()
         self.hidden_analyzer = HiddenContentAnalyzer()
         self.injection_detector = PromptInjectionDetector()
         self.exfiltration_detector = ExfiltrationDetector()
         self.agentic_detector = AgenticIntentDetector()
-        self.policy_engine = PolicyEngine()
-        self.agent_controller = AgentController()
-        self.logger = SecurityLogger()
         
-        self.logger.log_info("UnseenLinkGuard initialized")
+        # New enhanced modules
+        self.semantic_detector = SemanticThreatDetector() if self.config.is_feature_enabled('semantic_detection') else None
+        self.deobfuscator = ContentDeobfuscator() if self.config.is_feature_enabled('active_deobfuscation') else None
+        self.ocr_analyzer = OCRContentAnalyzer() if self.config.is_feature_enabled('ocr_analysis') else None
+        
+        # Performance settings
+        self.parallel_enabled = self.config.get_parallel_execution_enabled()
+        self.max_workers = self.config.get_max_workers()
+        
+        self.logger.log_info("UnseenLinkGuard initialized with enhanced security modules")
+        self.logger.log_info(f"Parallel execution: {self.parallel_enabled}, Max workers: {self.max_workers}")
+        self.logger.log_info(f"Semantic detection: {self.semantic_detector is not None}")
+        self.logger.log_info(f"De-obfuscation: {self.deobfuscator is not None}")
+        self.logger.log_info(f"OCR analysis: {self.ocr_analyzer is not None}")
     
-    def process_input(self, input_data: str, input_type: str = "auto") -> dict:
+    def process_input(self, input_data: str, input_type: str = "auto", image_path: str = None) -> dict:
         """Main entry point for processing input through security gateway."""
         
         self.logger.log_info(f"Processing input of type: {input_type}")
         
+        # Handle image input for OCR
+        ocr_text = None
+        if image_path and self.ocr_analyzer and self.ocr_analyzer.can_process(image_path):
+            self.logger.log_info(f"Performing OCR on image: {image_path}")
+            ocr_text = self.ocr_analyzer.extract_text_from_image(image_path)
+            if ocr_text:
+                self.logger.log_info(f"OCR extracted {len(ocr_text)} characters")
+                # Combine OCR text with input data
+                input_data = input_data + "\n\n[OCR_EXTRACTED_TEXT]\n" + ocr_text
+        
+        # Extract content
         extracted = self.input_handler.process_input(input_data, input_type)
         
+        # De-obfuscate content if enabled
+        decoded_content = ""
+        if self.deobfuscator:
+            decoded_content = self.deobfuscator.get_decoded_content(
+                extracted.visible_text, 
+                extracted.hidden_elements
+            )
+            if decoded_content:
+                self.logger.log_info(f"De-obfuscation extracted {len(decoded_content)} characters")
+                # Add decoded content to analysis
+                extracted.hidden_elements.append(f"[DECODED_CONTENT] {decoded_content}")
+        
+        # Build content blocks
         content_blocks = [
             ContentBlock(
                 content=extracted.visible_text,
@@ -89,39 +144,23 @@ class UnseenLinkGuard:
                 )
             )
         
-        analysis_results = []
+        # Run analysis (parallel or sequential)
+        if self.parallel_enabled:
+            analysis_results = self._run_parallel_analysis(
+                extracted.visible_text, 
+                extracted.hidden_elements,
+                extracted.metadata,
+                ocr_text
+            )
+        else:
+            analysis_results = self._run_sequential_analysis(
+                extracted.visible_text,
+                extracted.hidden_elements,
+                extracted.metadata,
+                ocr_text
+            )
         
-        intent_analysis = self.intent_classifier.analyze(
-            extracted.visible_text,
-            extracted.hidden_elements
-        )
-        analysis_results.append(intent_analysis)
-        
-        hidden_analysis = self.hidden_analyzer.analyze(
-            extracted.visible_text,
-            extracted.hidden_elements
-        )
-        analysis_results.append(hidden_analysis)
-        
-        injection_analysis = self.injection_detector.analyze(
-            extracted.visible_text,
-            extracted.hidden_elements
-        )
-        analysis_results.append(injection_analysis)
-        
-        exfiltration_analysis = self.exfiltration_detector.analyze(
-            extracted.visible_text,
-            extracted.hidden_elements,
-            extracted.metadata
-        )
-        analysis_results.append(exfiltration_analysis)
-        
-        agentic_analysis = self.agentic_detector.analyze(
-            extracted.visible_text,
-            extracted.hidden_elements
-        )
-        analysis_results.append(agentic_analysis)
-        
+        # Make security decision
         assessment = self.policy_engine.make_decision(
             analysis_results,
             extracted.visible_text,
@@ -131,7 +170,13 @@ class UnseenLinkGuard:
         assessment.content_blocks = content_blocks
         assessment.source = extracted.metadata.get("source_url", "direct_input")
         
-        if agentic_analysis.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+        # Check for agentic intent
+        agentic_analysis = next(
+            (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        
+        if agentic_analysis and agentic_analysis.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
             assessment.agentic_intent_detected = True
             requested_actions = [
                 f.get('action') for f in agentic_analysis.findings 
@@ -139,6 +184,7 @@ class UnseenLinkGuard:
             ]
             assessment.requested_actions = list(set(requested_actions))
         
+        # Apply restrictions
         session_id = str(uuid.uuid4())
         
         restrictions = self.policy_engine._determine_restrictions(
@@ -153,6 +199,7 @@ class UnseenLinkGuard:
             f"Restrictions applied: mode={restrictions.mode}, enforcement={apply_result.get('enforcement_status')}"
         )
         
+        # Log security event
         event = SecurityEvent(
             event_id=assessment.input_id,
             timestamp=assessment.timestamp.isoformat(),
@@ -181,13 +228,103 @@ class UnseenLinkGuard:
                 "enforcement_mode": restrictions.mode,
                 "requires_approval": restrictions.requires_approval,
                 "primary_intent": assessment.primary_intent.value,
-                "intent_confidence": assessment.intent_confidence
+                "intent_confidence": assessment.intent_confidence,
+                "ocr_used": ocr_text is not None,
+                "decoded_content_found": len(decoded_content) > 0 if decoded_content else False
             }
         )
         
         self.logger.log_security_event(event)
         
         return self._format_response(assessment, session_id)
+    
+    def _run_parallel_analysis(
+        self,
+        visible_text: str,
+        hidden_elements: List[str],
+        metadata: dict,
+        ocr_text: str = None
+    ) -> List:
+        """Run analysis modules in parallel for better performance."""
+        
+        analysis_results = []
+        
+        # Define analysis tasks
+        tasks = [
+            ("intent", lambda: self.intent_classifier.analyze(visible_text, hidden_elements)),
+            ("hidden", lambda: self.hidden_analyzer.analyze(visible_text, hidden_elements)),
+            ("injection", lambda: self.injection_detector.analyze(visible_text, hidden_elements)),
+            ("exfiltration", lambda: self.exfiltration_detector.analyze(visible_text, hidden_elements, metadata)),
+            ("agentic", lambda: self.agentic_detector.analyze(visible_text, hidden_elements)),
+        ]
+        
+        # Add optional modules
+        if self.semantic_detector:
+            tasks.append(("semantic", lambda: self.semantic_detector.analyze(visible_text, hidden_elements)))
+        
+        if self.deobfuscator:
+            tasks.append(("deobfuscator", lambda: self.deobfuscator.analyze(visible_text, hidden_elements)))
+        
+        if self.ocr_analyzer and ocr_text:
+            tasks.append(("ocr", lambda: self.ocr_analyzer.analyze(ocr_text, "image_input")))
+        
+        # Execute in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_task = {executor.submit(task_fn): task_name for task_name, task_fn in tasks}
+            
+            for future in as_completed(future_to_task):
+                task_name = future_to_task[future]
+                try:
+                    result = future.result(timeout=self.config.get('performance', 'analysis_timeout', default=30))
+                    analysis_results.append(result)
+                    self.logger.log_info(f"Completed analysis: {task_name}")
+                except Exception as e:
+                    self.logger.log_error(f"Analysis failed for {task_name}: {str(e)}")
+        
+        return analysis_results
+    
+    def _run_sequential_analysis(
+        self,
+        visible_text: str,
+        hidden_elements: List[str],
+        metadata: dict,
+        ocr_text: str = None
+    ) -> List:
+        """Run analysis modules sequentially."""
+        
+        analysis_results = []
+        
+        # Intent classification (always first for intent-first enforcement)
+        intent_analysis = self.intent_classifier.analyze(visible_text, hidden_elements)
+        analysis_results.append(intent_analysis)
+        
+        # Core analysis modules
+        hidden_analysis = self.hidden_analyzer.analyze(visible_text, hidden_elements)
+        analysis_results.append(hidden_analysis)
+        
+        injection_analysis = self.injection_detector.analyze(visible_text, hidden_elements)
+        analysis_results.append(injection_analysis)
+        
+        exfiltration_analysis = self.exfiltration_detector.analyze(visible_text, hidden_elements, metadata)
+        analysis_results.append(exfiltration_analysis)
+        
+        agentic_analysis = self.agentic_detector.analyze(visible_text, hidden_elements)
+        analysis_results.append(agentic_analysis)
+        
+        # Enhanced modules (if enabled)
+        if self.semantic_detector:
+            semantic_analysis = self.semantic_detector.analyze(visible_text, hidden_elements)
+            analysis_results.append(semantic_analysis)
+        
+        if self.deobfuscator:
+            deobfuscator_analysis = self.deobfuscator.analyze(visible_text, hidden_elements)
+            analysis_results.append(deobfuscator_analysis)
+        
+        if self.ocr_analyzer and ocr_text:
+            ocr_analysis = self.ocr_analyzer.analyze(ocr_text, "image_input")
+            analysis_results.append(ocr_analysis)
+        
+        return analysis_results
     
     def _format_response(self, assessment, session_id: str) -> dict:
         """Format assessment into response dictionary."""
@@ -226,30 +363,26 @@ class UnseenLinkGuard:
         }
 
 
-def read_file_content(file_path: Path) -> str:
+def read_file_content(file_path: Path) -> Tuple[str, str]:
     """
     Read file content, handling different file types.
-    
-    Args:
-        file_path: Path to the file
-        
-    Returns:
-        File content as string
-        
-    Raises:
-        ValueError: If file type is not supported or cannot be read
+    Returns (content, image_path) where image_path is set if file is an image.
     """
     suffix = file_path.suffix.lower()
+    
+    # Image files - return path for OCR processing
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+    if suffix in image_extensions:
+        return f"[IMAGE FILE: {file_path.name}]", str(file_path)
     
     # Text files
     text_extensions = {'.txt', '.md', '.html', '.xml', '.csv', '.json', '.py', '.js', '.yaml', '.yml', '.log'}
     if suffix in text_extensions:
         try:
-            return file_path.read_text(encoding='utf-8').strip()
+            return file_path.read_text(encoding='utf-8').strip(), None
         except UnicodeDecodeError:
-            # Try with latin-1 as fallback
             try:
-                return file_path.read_text(encoding='latin-1').strip()
+                return file_path.read_text(encoding='latin-1').strip(), None
             except Exception as e:
                 raise ValueError(f"Cannot read text file {file_path}: {str(e)}")
     
@@ -264,11 +397,11 @@ def read_file_content(file_path: Path) -> str:
             result = '\n'.join(content).strip()
             if not result:
                 raise ValueError("CSV file is empty")
-            return result
+            return result, None
         except Exception as e:
             raise ValueError(f"Error reading CSV file {file_path}: {str(e)}")
     
-    # Excel files (.xlsx, .xls)
+    # Excel files
     elif suffix in {'.xlsx', '.xls'}:
         if not HAS_OPENPYXL:
             raise ValueError(
@@ -287,11 +420,11 @@ def read_file_content(file_path: Path) -> str:
             result = '\n'.join(content).strip()
             if not result:
                 raise ValueError("Excel file is empty or contains no readable data")
-            return result
+            return result, None
         except Exception as e:
             raise ValueError(f"Error reading Excel file {file_path}: {str(e)}")
     
-    # Word documents (.docx)
+    # Word documents
     elif suffix == '.docx':
         if not HAS_PYTHON_DOCX:
             raise ValueError(
@@ -304,7 +437,6 @@ def read_file_content(file_path: Path) -> str:
             for para in doc.paragraphs:
                 if para.text.strip():
                     content.append(para.text)
-            # Also extract text from tables
             for table in doc.tables:
                 for row in table.rows:
                     row_values = [cell.text for cell in row.cells]
@@ -312,11 +444,11 @@ def read_file_content(file_path: Path) -> str:
             result = '\n'.join(content).strip()
             if not result:
                 raise ValueError("Word document contains no readable text")
-            return result
+            return result, None
         except Exception as e:
             raise ValueError(f"Error reading Word document {file_path}: {str(e)}")
     
-    # PowerPoint presentations (.pptx)
+    # PowerPoint presentations
     elif suffix == '.pptx':
         if not HAS_PYTHON_PPTX:
             raise ValueError(
@@ -334,7 +466,7 @@ def read_file_content(file_path: Path) -> str:
             result = '\n'.join(content).strip()
             if not result:
                 raise ValueError("PowerPoint presentation contains no readable text")
-            return result
+            return result, None
         except Exception as e:
             raise ValueError(f"Error reading PowerPoint file {file_path}: {str(e)}")
     
@@ -355,25 +487,25 @@ def read_file_content(file_path: Path) -> str:
             result = '\n'.join(text_content).strip()
             if not result:
                 raise ValueError("No text could be extracted from the PDF")
-            return result
+            return result, None
         except Exception as e:
             raise ValueError(f"Error reading PDF file {file_path}: {str(e)}")
     
-    # Other common file types
-    elif suffix in {'.jpg', '.jpeg', '.png', '.gif', '.img', '.bin', '.zip', '.tar', '.gz'}:
+    # Binary/unsupported formats
+    elif suffix in {'.zip', '.tar', '.gz', '.bin'}:
         raise ValueError(
             f"Binary file format '{suffix}' is not supported. "
-            "Please provide a text, CSV, Excel, Word, PowerPoint, or PDF file."
+            "Supported: text, CSV, Excel, Word, PowerPoint, PDF, and images for OCR."
         )
     
-    # Unknown extension - try as text
+    # Unknown - try as text
     else:
         try:
-            return file_path.read_text(encoding='utf-8').strip()
+            return file_path.read_text(encoding='utf-8').strip(), None
         except (UnicodeDecodeError, OSError):
             raise ValueError(
                 f"Unable to read file {file_path}. "
-                "Supported formats: .txt, .md, .html, .csv, .xlsx, .xls, .docx, .pptx, .pdf, and other text files"
+                "Supported: .txt, .md, .html, .csv, .xlsx, .docx, .pptx, .pdf, and images (.jpg, .png, etc.)"
             )
 
 
@@ -381,7 +513,8 @@ def main():
     """CLI entry point."""
     
     print("=" * 60)
-    print("UnseenLinkGuard - LLM Security Gateway")
+    print("UnseenLinkGuard - Enhanced LLM Security Gateway")
+    print("Features: Semantic Detection | De-obfuscation | OCR")
     print("=" * 60)
     print()
     
@@ -390,21 +523,21 @@ def main():
     if len(sys.argv) > 1:
         input_arg = " ".join(sys.argv[1:])
         
-        # Check if argument is a file path
         file_path = Path(input_arg)
         if file_path.exists() and file_path.is_file():
             try:
-                file_content = read_file_content(file_path)
+                file_content, image_path = read_file_content(file_path)
                 if file_content:
                     print(f"Processing input from file: {file_path}")
+                    if image_path:
+                        print(f"OCR will be performed on image")
                     print("-" * 60 + "\n")
-                    process_and_display_result(guard, file_content, str(file_path))
+                    process_and_display_result(guard, file_content, str(file_path), image_path)
                     return
             except ValueError as e:
                 print(f"Error: {str(e)}", file=sys.stderr)
                 sys.exit(1)
         else:
-            # Treat as direct input
             process_and_display_result(guard, input_arg)
             return
     
@@ -424,18 +557,18 @@ def main():
     input_file_path = Path("input.txt")
     if input_file_path.exists():
         try:
-            file_content = read_file_content(input_file_path)
+            file_content, image_path = read_file_content(input_file_path)
             if file_content:
                 print("Processing input from input.txt...")
                 print("-" * 60 + "\n")
-                process_and_display_result(guard, file_content, "input.txt")
+                process_and_display_result(guard, file_content, "input.txt", image_path)
                 return
         except ValueError as e:
             print(f"Error: {str(e)}", file=sys.stderr)
             sys.exit(1)
     
-    print("Enter URL, text to analyze, or file path (or 'quit' to exit):")
-    print("Supported file types: .txt, .md, .html, .csv, .xlsx, .xls, .docx, .pptx, .pdf")
+    print("Enter URL, text, or file path (or 'quit' to exit):")
+    print("Supported: .txt, .md, .html, .csv, .xlsx, .docx, .pptx, .pdf, images (.jpg, .png)")
     print()
     
     while True:
@@ -449,16 +582,17 @@ def main():
             if not user_input:
                 continue
             
-            # Check if input is a file path
             file_path = Path(user_input)
             if file_path.exists() and file_path.is_file():
                 try:
-                    file_content = read_file_content(file_path)
+                    file_content, image_path = read_file_content(file_path)
                     if file_content:
                         print("\n" + "-" * 60)
-                        print(f"Processing input from file: {file_path}")
+                        print(f"Processing file: {file_path}")
+                        if image_path:
+                            print("OCR will be performed on image")
                         print("-" * 60 + "\n")
-                        result = guard.process_input(file_content)
+                        result = guard.process_input(file_content, image_path=image_path)
                         display_result(result)
                     else:
                         print(f"File {file_path} is empty.")
@@ -481,12 +615,12 @@ def main():
             print()
 
 
-def process_and_display_result(guard, input_data, source=None):
+def process_and_display_result(guard, input_data, source=None, image_path=None):
     """Process input and display result (for non-interactive mode)."""
     try:
         if source:
             print(f"File: {source}")
-        result = guard.process_input(input_data)
+        result = guard.process_input(input_data, image_path=image_path)
         display_result(result)
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)

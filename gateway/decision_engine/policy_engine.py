@@ -4,34 +4,41 @@ from gateway.shared.schemas import (
     AnalysisResult, RiskLevel, SecurityDecision, 
     AgentRestrictions, SecurityAssessment, ContentIntent
 )
+from gateway.shared.config_loader import get_config
 
 
 class PolicyEngine:
-    """Makes security decisions and determines agent restrictions based on analysis."""
+    """
+    Enhanced policy engine with intent-first enforcement and fail-closed defaults.
+    Implements strict security rules to prevent instructional content from bypassing controls.
+    """
     
     def __init__(self):
-        self.risk_weights = {
-            "intent_classifier": 0.35,
-            "hidden_content_analyzer": 0.15,
-            "prompt_injection_detector": 0.2,
-            "exfiltration_detector": 0.15,
-            "agentic_intent_detector": 0.15,
+        self.config = get_config()
+        
+        # Load from config with fallbacks
+        self.risk_weights = self.config.get_risk_weights()
+        self.decision_thresholds = self.config.get_decision_thresholds()
+        self.intent_risk_floors = self._convert_intent_floors()
+        self.baseline_risks = self.config.get_baseline_risks()
+        
+        # Enforcement flags
+        self.fail_closed = self.config.get('enforcement', 'fail_closed', default=True)
+        self.strict_intent_enforcement = self.config.get('enforcement', 'strict_intent_enforcement', default=True)
+    
+    def _convert_intent_floors(self) -> dict:
+        """Convert string intent keys to ContentIntent enum keys."""
+        raw_floors = self.config.get_intent_risk_floors()
+        
+        intent_map = {
+            'malicious': ContentIntent.MALICIOUS,
+            'conditional_instructional': ContentIntent.CONDITIONAL_INSTRUCTIONAL,
+            'instructional': ContentIntent.INSTRUCTIONAL,
+            'ambiguous': ContentIntent.AMBIGUOUS,
+            'descriptive': ContentIntent.DESCRIPTIVE,
         }
         
-        self.decision_thresholds = {
-            "block": 0.75,
-            "require_approval": 0.4,
-            "sanitize": 0.2,
-            "allow": 0.0,
-        }
-        
-        self.intent_risk_floors = {
-            ContentIntent.MALICIOUS: 0.95,
-            ContentIntent.CONDITIONAL_INSTRUCTIONAL: 0.7,
-            ContentIntent.INSTRUCTIONAL: 0.5,
-            ContentIntent.AMBIGUOUS: 0.3,
-            ContentIntent.DESCRIPTIVE: 0.0,
-        }
+        return {intent_map[k]: v for k, v in raw_floors.items() if k in intent_map}
     
     def make_decision(
         self, 
@@ -39,12 +46,13 @@ class PolicyEngine:
         visible_text: str,
         hidden_elements: List[str]
     ) -> SecurityAssessment:
-        """Generate comprehensive security assessment and decision."""
+        """Generate comprehensive security assessment with strict enforcement."""
         
         overall_risk, risk_score = self._calculate_overall_risk(analysis_results)
         
         primary_intent, intent_confidence = self._determine_primary_intent(analysis_results)
         
+        # INTENT-FIRST ENFORCEMENT: Intent determines minimum decision level
         decision = self._determine_decision(
             overall_risk, 
             risk_score, 
@@ -92,7 +100,10 @@ class PolicyEngine:
         self, 
         results: List[AnalysisResult]
     ) -> Tuple[RiskLevel, float]:
-        """Calculate weighted overall risk from all analysis modules with intent-first approach."""
+        """
+        Calculate weighted overall risk with intent-first approach and baseline floors.
+        Ensures risk is monotonic and cumulative.
+        """
         
         risk_values = {
             RiskLevel.SAFE: 0.0,
@@ -102,25 +113,27 @@ class PolicyEngine:
             RiskLevel.CRITICAL: 1.0,
         }
         
+        # 1. Get intent-based risk floor
         intent_result = next(
             (r for r in results if r.module_name == "intent_classifier"),
             None
         )
         
+        intent_floor = 0.0
         if intent_result and intent_result.detected_intent:
             intent_floor = self.intent_risk_floors.get(
                 intent_result.detected_intent, 
-                0.0
+                0.3  # Default floor for unknown intent
             )
-        else:
-            intent_floor = 0.0
         
+        # 2. Calculate weighted risk from all modules
         weighted_sum = 0.0
         total_weight = 0.0
         
         for result in results:
-            weight = self.risk_weights.get(result.module_name, 0.1)
+            weight = self.risk_weights.get(result.module_name, 0.05)
             
+            # Use explicit risk_score if available, otherwise convert risk_level
             risk_score = result.risk_score if result.risk_score > 0 else risk_values[result.risk_level]
             weighted_risk = risk_score * result.confidence * weight
             
@@ -129,16 +142,35 @@ class PolicyEngine:
         
         calculated_risk = weighted_sum / total_weight if total_weight > 0 else 0.0
         
+        # 3. Apply intent floor (risk cannot be below intent-based minimum)
         risk_score = max(calculated_risk, intent_floor)
         
+        # 4. Add baseline risks for specific content types
+        risk_score = self._apply_baseline_risks(risk_score, results)
+        
+        # 5. Boost risk for high-severity modules
         agentic_result = next(
             (r for r in results if r.module_name == "agentic_intent_detector"),
             None
         )
         
         if agentic_result and agentic_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
-            risk_score = max(risk_score, 0.5)
+            risk_score = max(risk_score, 0.5)  # Agentic intent floor
         
+        deobfuscator_result = next(
+            (r for r in results if r.module_name == "content_deobfuscator"),
+            None
+        )
+        
+        if deobfuscator_result and deobfuscator_result.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]:
+            # Decoded content with high risk is very suspicious
+            risk_score = max(risk_score, 0.6)
+        
+        # 6. Ensure risk is non-zero for non-descriptive content
+        if intent_result and intent_result.detected_intent != ContentIntent.DESCRIPTIVE:
+            risk_score = max(risk_score, 0.2)  # Minimum for any instructional content
+        
+        # 7. Convert to risk level
         if risk_score >= 0.8:
             overall_risk = RiskLevel.CRITICAL
         elif risk_score >= 0.6:
@@ -150,7 +182,41 @@ class PolicyEngine:
         else:
             overall_risk = RiskLevel.SAFE
         
-        return overall_risk, risk_score
+        return overall_risk, min(1.0, risk_score)
+    
+    def _apply_baseline_risks(self, current_risk: float, results: List[AnalysisResult]) -> float:
+        """Apply baseline risk increases for specific content types."""
+        
+        risk = current_risk
+        
+        # OCR content baseline
+        ocr_result = next(
+            (r for r in results if r.module_name == "ocr_content_analyzer"),
+            None
+        )
+        if ocr_result and ocr_result.risk_level != RiskLevel.SAFE:
+            baseline = self.baseline_risks.get('ocr_extracted', 0.25)
+            risk = max(risk, baseline)
+        
+        # Decoded content baseline
+        deobfuscator_result = next(
+            (r for r in results if r.module_name == "content_deobfuscator"),
+            None
+        )
+        if deobfuscator_result and deobfuscator_result.risk_level != RiskLevel.SAFE:
+            baseline = self.baseline_risks.get('decoded_content', 0.20)
+            risk = max(risk, baseline)
+        
+        # Hidden content baseline
+        hidden_result = next(
+            (r for r in results if r.module_name == "hidden_content_analyzer"),
+            None
+        )
+        if hidden_result and hidden_result.risk_level != RiskLevel.SAFE:
+            baseline = self.baseline_risks.get('hidden_elements', 0.15)
+            risk = max(risk, baseline)
+        
+        return risk
     
     def _determine_primary_intent(
         self,
@@ -166,6 +232,7 @@ class PolicyEngine:
         if intent_result and intent_result.detected_intent:
             return intent_result.detected_intent, intent_result.confidence
         
+        # Fail closed: treat unknown intent as ambiguous
         return ContentIntent.AMBIGUOUS, 0.5
     
     def _determine_decision(
@@ -175,33 +242,65 @@ class PolicyEngine:
         analysis_results: List[AnalysisResult],
         primary_intent: ContentIntent
     ) -> SecurityDecision:
-        """Determine action based on risk assessment with intent-first enforcement."""
+        """
+        STRICT INTENT-FIRST ENFORCEMENT.
         
+        Hard rules:
+        - MALICIOUS intent → BLOCK
+        - CONDITIONAL_INSTRUCTIONAL → BLOCK or REQUIRE_APPROVAL (never ALLOW)
+        - INSTRUCTIONAL → BLOCK, REQUIRE_APPROVAL, or SANITIZE (never ALLOW)
+        - AMBIGUOUS → Fail closed (REQUIRE_APPROVAL or SANITIZE)
+        - DESCRIPTIVE + low risk → Can ALLOW
+        """
+        
+        # RULE 1: Malicious intent = immediate block
         if primary_intent == ContentIntent.MALICIOUS:
             return SecurityDecision.BLOCK
         
+        # RULE 2: Conditional AI-targeted instructions
         if primary_intent == ContentIntent.CONDITIONAL_INSTRUCTIONAL:
             if risk_score >= 0.8:
                 return SecurityDecision.BLOCK
             else:
-                return SecurityDecision.REQUIRE_APPROVAL
+                return SecurityDecision.REQUIRE_APPROVAL  # Never ALLOW
         
+        # RULE 3: General instructional content
         if primary_intent == ContentIntent.INSTRUCTIONAL:
-            if risk_score >= 0.8:
-                return SecurityDecision.BLOCK
-            elif risk_score >= 0.5:
-                return SecurityDecision.REQUIRE_APPROVAL
+            if self.strict_intent_enforcement:
+                # Strict mode: instructions never auto-allow
+                if risk_score >= 0.8:
+                    return SecurityDecision.BLOCK
+                elif risk_score >= 0.5:
+                    return SecurityDecision.REQUIRE_APPROVAL
+                else:
+                    return SecurityDecision.SANITIZE  # Minimum: sanitize
             else:
-                return SecurityDecision.SANITIZE
+                # Legacy mode (not recommended)
+                if risk_score >= 0.8:
+                    return SecurityDecision.BLOCK
+                elif risk_score >= 0.5:
+                    return SecurityDecision.REQUIRE_APPROVAL
+                else:
+                    return SecurityDecision.SANITIZE
         
+        # RULE 4: Ambiguous intent - fail closed
         if primary_intent == ContentIntent.AMBIGUOUS:
-            if risk_score >= 0.6:
-                return SecurityDecision.BLOCK
-            elif risk_score >= 0.3:
-                return SecurityDecision.REQUIRE_APPROVAL
+            if self.fail_closed:
+                if risk_score >= 0.6:
+                    return SecurityDecision.BLOCK
+                elif risk_score >= 0.3:
+                    return SecurityDecision.REQUIRE_APPROVAL
+                else:
+                    return SecurityDecision.SANITIZE  # Don't allow ambiguous
             else:
-                return SecurityDecision.SANITIZE
+                if risk_score >= 0.6:
+                    return SecurityDecision.BLOCK
+                elif risk_score >= 0.3:
+                    return SecurityDecision.REQUIRE_APPROVAL
+                else:
+                    return SecurityDecision.SANITIZE
         
+        # RULE 5: Check for agentic intent (overrides descriptive classification)
         agentic_result = next(
             (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
             None
@@ -225,7 +324,8 @@ class PolicyEngine:
             else:
                 return SecurityDecision.SANITIZE
         
-        if risk_level == RiskLevel.CRITICAL or risk_score >= self.decision_thresholds["block"]:
+        # RULE 6: Threshold-based decisions (for descriptive content)
+        if risk_score >= self.decision_thresholds["block"]:
             return SecurityDecision.BLOCK
         
         elif risk_score >= self.decision_thresholds["require_approval"]:
@@ -234,10 +334,12 @@ class PolicyEngine:
         elif risk_score >= self.decision_thresholds["sanitize"]:
             return SecurityDecision.SANITIZE
         
-        elif primary_intent == ContentIntent.DESCRIPTIVE and risk_score < 0.15:
+        # RULE 7: ALLOW only for truly safe descriptive content
+        elif primary_intent == ContentIntent.DESCRIPTIVE and risk_score < self.decision_thresholds["allow"]:
             return SecurityDecision.ALLOW
         
         else:
+            # Default: sanitize (fail safe)
             return SecurityDecision.SANITIZE
     
     def _determine_restrictions(
@@ -250,6 +352,7 @@ class PolicyEngine:
         
         restrictions = AgentRestrictions()
         
+        # Intent-based restriction modes
         if primary_intent in [ContentIntent.MALICIOUS, ContentIntent.CONDITIONAL_INSTRUCTIONAL]:
             restrictions.mode = "ACTION_DISABLED"
             restrictions.allow_web_access = False
@@ -281,6 +384,7 @@ class PolicyEngine:
             restrictions.max_output_length = 1500
             return restrictions
         
+        # Threat-specific restrictions
         has_exfiltration = any(
             r.module_name == "exfiltration_detector" and 
             r.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]
@@ -436,6 +540,39 @@ class PolicyEngine:
             reasoning_parts.append(f"- {intent_result.details}")
             reasoning_parts.append("")
         
+        # Include semantic analysis if present
+        semantic_result = next(
+            (r for r in results if r.module_name == "semantic_threat_detector"),
+            None
+        )
+        
+        if semantic_result and semantic_result.risk_level != RiskLevel.SAFE:
+            reasoning_parts.append("Semantic Analysis:")
+            reasoning_parts.append(f"- {semantic_result.details}")
+            reasoning_parts.append("")
+        
+        # Include deobfuscation results if present
+        deobfuscator_result = next(
+            (r for r in results if r.module_name == "content_deobfuscator"),
+            None
+        )
+        
+        if deobfuscator_result and deobfuscator_result.risk_level != RiskLevel.SAFE:
+            reasoning_parts.append("De-obfuscation Analysis:")
+            reasoning_parts.append(f"- {deobfuscator_result.details}")
+            reasoning_parts.append("")
+        
+        # Include OCR results if present
+        ocr_result = next(
+            (r for r in results if r.module_name == "ocr_content_analyzer"),
+            None
+        )
+        
+        if ocr_result and ocr_result.risk_level != RiskLevel.SAFE:
+            reasoning_parts.append("OCR Analysis:")
+            reasoning_parts.append(f"- {ocr_result.details}")
+            reasoning_parts.append("")
+        
         agentic_result = next(
             (r for r in results if r.module_name == "agentic_intent_detector"),
             None
@@ -475,7 +612,9 @@ class PolicyEngine:
         high_findings = []
         
         for result in results:
-            if result.module_name in ["agentic_intent_detector", "intent_classifier"]:
+            if result.module_name in ["agentic_intent_detector", "intent_classifier", 
+                                      "semantic_threat_detector", "content_deobfuscator", 
+                                      "ocr_content_analyzer"]:
                 continue
             
             if result.risk_level == RiskLevel.CRITICAL:
@@ -499,11 +638,11 @@ class PolicyEngine:
         
         if decision == SecurityDecision.BLOCK:
             reasoning_parts.append(
-                "Action: Content BLOCKED due to critical security threats or malicious intent."
+                "Action: Content BLOCKED due to critical security threats or malicious/instructional intent."
             )
         elif decision == SecurityDecision.REQUIRE_APPROVAL:
             reasoning_parts.append(
-                "Action: HUMAN APPROVAL REQUIRED - instructional or agentic content detected."
+                "Action: HUMAN APPROVAL REQUIRED - instructional, agentic, or ambiguous content detected."
             )
         elif decision == SecurityDecision.SANITIZE:
             reasoning_parts.append(
