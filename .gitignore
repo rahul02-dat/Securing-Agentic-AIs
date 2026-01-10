@@ -7,4 +7,11 @@ input.txt
 *.docx
 *.pptx
 *.csv
+*.json
+*.sh
 SUPPORTED_FORMATS.md
+evaluation_results/
+.DS_Store
+compare_evaluations.py
+tester.py
+visualizer.py
