@@ -4,7 +4,6 @@ from gateway.shared.schemas import AnalysisResult, RiskLevel
 
 
 class PromptInjectionDetector:
-    """Detects indirect prompt injection attempts in content."""
     
     def __init__(self):
         self.injection_patterns = [
@@ -12,19 +11,17 @@ class PromptInjectionDetector:
             (r'disregard\s+(all\s+)?(previous|prior|above)', 0.9),
             (r'forget\s+(everything|all)\s+(you\s+)?(were\s+)?told', 0.9),
             (r'new\s+(instructions|task|role|system\s+prompt)', 0.85),
-            (r'you\s+are\s+now\s+(a|an|the)', 0.8),
+            (r'you\s+are\s+now\s+(a|an|the)', 0.75),
             (r'from\s+now\s+on,?\s+you\s+(will|are|must|should)', 0.85),
             (r'your\s+(new\s+)?(role|task|purpose|objective)\s+is', 0.85),
-            (r'system\s*:\s*', 0.7),
-            (r'assistant\s*:\s*', 0.7),
-            (r'\[SYSTEM\]|\[INST\]|\[USER\]', 0.75),
+            (r'system\s*:\s*', 0.65),
+            (r'assistant\s*:\s*', 0.65),
+            (r'\[SYSTEM\]|\[INST\]|\[USER\]', 0.7),
             (r'override\s+(all\s+)?(safety|security|default)', 0.9),
             (r'bypass\s+(the\s+)?(filter|check|validation|security)', 0.9),
             (r'jailbreak|prompt\s+injection|prompt\s+leak', 0.95),
             (r'reveal\s+(your|the)\s+(system\s+)?(prompt|instructions)', 0.9),
             (r'what\s+(are|were)\s+your\s+(original|initial)\s+instructions', 0.85),
-            (r'execute\s+(this\s+)?(code|command|script)', 0.8),
-            (r'run\s+(this\s+)?(python|javascript|bash|shell)', 0.85),
         ]
         
         self.context_switches = [
@@ -43,7 +40,6 @@ class PromptInjectionDetector:
         ]
     
     def analyze(self, visible_text: str, hidden_elements: List[str]) -> AnalysisResult:
-        """Detect prompt injection attempts in visible and hidden content."""
         
         findings = []
         max_risk = 0.0
@@ -70,7 +66,7 @@ class PromptInjectionDetector:
         structure_findings = self._detect_structural_attacks(visible_text, hidden_elements)
         if structure_findings:
             findings.extend(structure_findings)
-            max_risk = max(max_risk, 0.75)
+            max_risk = max(max_risk, 0.7)
         
         risk_level = self._calculate_risk_level(max_risk)
         
@@ -80,19 +76,23 @@ class PromptInjectionDetector:
                 risk_level=RiskLevel.SAFE,
                 confidence=0.9,
                 findings=[],
-                details="No prompt injection patterns detected."
+                details="No prompt injection patterns detected.",
+                risk_score=0.0
             )
+        
+        confidence = min(0.95, max_risk + 0.1)
+        details = f"Detected {len(findings)} injection pattern(s). Max risk: {max_risk:.2f}"
         
         return AnalysisResult(
             module_name="prompt_injection_detector",
             risk_level=risk_level,
-            confidence=min(0.95, max_risk + 0.1),
+            confidence=confidence,
             findings=findings,
-            details=f"Detected {len(findings)} potential prompt injection attempts."
+            details=details,
+            risk_score=max_risk
         )
     
     def _scan_text(self, text: str, location: str) -> Tuple[List[Dict], float]:
-        """Scan text for injection patterns."""
         findings = []
         max_risk = 0.0
         text_lower = text.lower()
@@ -102,19 +102,18 @@ class PromptInjectionDetector:
             for match in matches:
                 findings.append({
                     "type": "injection_pattern",
-                    "pattern": pattern,
+                    "pattern": pattern[:50],
                     "matched_text": match.group(0),
                     "location": location,
                     "severity": "critical" if risk_score >= 0.9 else "high",
                     "risk_score": risk_score,
-                    "description": f"Potential prompt injection detected: '{match.group(0)}'"
+                    "description": f"Injection pattern: '{match.group(0)}'"
                 })
                 max_risk = max(max_risk, risk_score)
         
         return findings, max_risk
     
     def _detect_context_switches(self, visible: str, hidden: List[str]) -> List[Dict]:
-        """Detect special tokens that might break context."""
         findings = []
         all_content = visible + ' '.join(hidden)
         
@@ -124,13 +123,12 @@ class PromptInjectionDetector:
                     "type": "context_switch",
                     "pattern": pattern,
                     "severity": "high",
-                    "description": f"Context switching token detected: {pattern}"
+                    "description": f"Context switch token: {pattern}"
                 })
         
         return findings
     
     def _detect_role_manipulation(self, visible: str, hidden: List[str]) -> List[Dict]:
-        """Detect attempts to change the AI's role or permissions."""
         findings = []
         all_content = (visible + ' '.join(hidden)).lower()
         
@@ -140,13 +138,12 @@ class PromptInjectionDetector:
                     "type": "role_manipulation",
                     "role": role,
                     "severity": "high",
-                    "description": f"Attempt to manipulate AI role: '{role}'"
+                    "description": f"Role manipulation: '{role}'"
                 })
         
         return findings
     
     def _detect_structural_attacks(self, visible: str, hidden: List[str]) -> List[Dict]:
-        """Detect structural manipulation attempts."""
         findings = []
         all_content = visible + ' '.join(hidden)
         
@@ -162,7 +159,7 @@ class PromptInjectionDetector:
                     "type": "structural_attack",
                     "pattern": "multi_line_string",
                     "severity": "medium",
-                    "description": "Multi-line string with suspicious content detected"
+                    "description": "Multi-line string with suspicious content"
                 })
         
         repeated_instructions = re.findall(
@@ -174,13 +171,12 @@ class PromptInjectionDetector:
                 "type": "repetition_attack",
                 "severity": "medium",
                 "count": len(repeated_instructions),
-                "description": f"Repeated instruction manipulation ({len(repeated_instructions)} times)"
+                "description": f"Repeated manipulation ({len(repeated_instructions)}x)"
             })
         
         return findings
     
     def _calculate_risk_level(self, score: float) -> RiskLevel:
-        """Convert numeric risk score to RiskLevel enum."""
         if score >= 0.85:
             return RiskLevel.CRITICAL
         elif score >= 0.7:
