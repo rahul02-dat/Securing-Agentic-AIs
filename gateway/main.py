@@ -10,28 +10,24 @@ from typing import List, Dict, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import PDF extraction library
 try:
     import pypdf
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
 
-# Import Excel handling libraries
 try:
     import openpyxl
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
 
-# Import Word document handling library
 try:
     from docx import Document as DocxDocument
     HAS_PYTHON_DOCX = True
 except ImportError:
     HAS_PYTHON_DOCX = False
 
-# Import PowerPoint handling library
 try:
     from pptx import Presentation
     HAS_PYTHON_PPTX = True
@@ -47,6 +43,7 @@ from gateway.analysis.intent_classifier import IntentClassifier
 from gateway.analysis.semantic_detector import SemanticThreatDetector
 from gateway.analysis.deobfuscator import ContentDeobfuscator
 from gateway.analysis.ocr_analyzer import OCRContentAnalyzer
+from gateway.analysis.houyi_pattern_detector import HOUYIPatternDetector
 from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
 from gateway.shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
@@ -55,65 +52,49 @@ from gateway.shared.config_loader import get_config
 
 
 class UnseenLinkGuard:
-    """
-    Enhanced LLM security gateway with:
-    - Semantic threat detection
-    - Active de-obfuscation
-    - OCR analysis for images
-    - Parallel execution
-    - Intent-first enforcement
-    """
     
     def __init__(self):
         self.config = get_config()
         
-        # Core components
         self.input_handler = LinkInputHandler()
         self.policy_engine = PolicyEngine()
         self.agent_controller = AgentController()
         self.logger = SecurityLogger(log_dir=self.config.get('logging', 'log_dir', default='logs'))
         
-        # Analysis modules
         self.intent_classifier = IntentClassifier()
         self.hidden_analyzer = HiddenContentAnalyzer()
         self.injection_detector = PromptInjectionDetector()
         self.exfiltration_detector = ExfiltrationDetector()
         self.agentic_detector = AgenticIntentDetector()
+        self.houyi_detector = HOUYIPatternDetector()
         
-        # New enhanced modules
         self.semantic_detector = SemanticThreatDetector() if self.config.is_feature_enabled('semantic_detection') else None
         self.deobfuscator = ContentDeobfuscator() if self.config.is_feature_enabled('active_deobfuscation') else None
         self.ocr_analyzer = OCRContentAnalyzer() if self.config.is_feature_enabled('ocr_analysis') else None
         
-        # Performance settings
         self.parallel_enabled = self.config.get_parallel_execution_enabled()
         self.max_workers = self.config.get_max_workers()
         
-        self.logger.log_info("UnseenLinkGuard initialized with enhanced security modules")
+        self.logger.log_info("UnseenLinkGuard initialized with HOUYI pattern detection")
         self.logger.log_info(f"Parallel execution: {self.parallel_enabled}, Max workers: {self.max_workers}")
         self.logger.log_info(f"Semantic detection: {self.semantic_detector is not None}")
         self.logger.log_info(f"De-obfuscation: {self.deobfuscator is not None}")
         self.logger.log_info(f"OCR analysis: {self.ocr_analyzer is not None}")
     
     def process_input(self, input_data: str, input_type: str = "auto", image_path: str = None) -> dict:
-        """Main entry point for processing input through security gateway."""
         
         self.logger.log_info(f"Processing input of type: {input_type}")
         
-        # Handle image input for OCR
         ocr_text = None
         if image_path and self.ocr_analyzer and self.ocr_analyzer.can_process(image_path):
             self.logger.log_info(f"Performing OCR on image: {image_path}")
             ocr_text = self.ocr_analyzer.extract_text_from_image(image_path)
             if ocr_text:
                 self.logger.log_info(f"OCR extracted {len(ocr_text)} characters")
-                # Combine OCR text with input data
                 input_data = input_data + "\n\n[OCR_EXTRACTED_TEXT]\n" + ocr_text
         
-        # Extract content
         extracted = self.input_handler.process_input(input_data, input_type)
         
-        # De-obfuscate content if enabled
         decoded_content = ""
         if self.deobfuscator:
             decoded_content = self.deobfuscator.get_decoded_content(
@@ -122,10 +103,8 @@ class UnseenLinkGuard:
             )
             if decoded_content:
                 self.logger.log_info(f"De-obfuscation extracted {len(decoded_content)} characters")
-                # Add decoded content to analysis
                 extracted.hidden_elements.append(f"[DECODED_CONTENT] {decoded_content}")
         
-        # Build content blocks
         content_blocks = [
             ContentBlock(
                 content=extracted.visible_text,
@@ -144,7 +123,6 @@ class UnseenLinkGuard:
                 )
             )
         
-        # Run analysis (parallel or sequential)
         if self.parallel_enabled:
             analysis_results = self._run_parallel_analysis(
                 extracted.visible_text, 
@@ -160,7 +138,6 @@ class UnseenLinkGuard:
                 ocr_text
             )
         
-        # Make security decision
         assessment = self.policy_engine.make_decision(
             analysis_results,
             extracted.visible_text,
@@ -170,7 +147,6 @@ class UnseenLinkGuard:
         assessment.content_blocks = content_blocks
         assessment.source = extracted.metadata.get("source_url", "direct_input")
         
-        # Check for agentic intent
         agentic_analysis = next(
             (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
             None
@@ -184,7 +160,6 @@ class UnseenLinkGuard:
             ]
             assessment.requested_actions = list(set(requested_actions))
         
-        # Apply restrictions
         session_id = str(uuid.uuid4())
         
         restrictions = self.policy_engine._determine_restrictions(
@@ -199,7 +174,6 @@ class UnseenLinkGuard:
             f"Restrictions applied: mode={restrictions.mode}, enforcement={apply_result.get('enforcement_status')}"
         )
         
-        # Log security event
         event = SecurityEvent(
             event_id=assessment.input_id,
             timestamp=assessment.timestamp.isoformat(),
@@ -245,20 +219,18 @@ class UnseenLinkGuard:
         metadata: dict,
         ocr_text: str = None
     ) -> List:
-        """Run analysis modules in parallel for better performance."""
         
         analysis_results = []
         
-        # Define analysis tasks
         tasks = [
             ("intent", lambda: self.intent_classifier.analyze(visible_text, hidden_elements)),
             ("hidden", lambda: self.hidden_analyzer.analyze(visible_text, hidden_elements)),
             ("injection", lambda: self.injection_detector.analyze(visible_text, hidden_elements)),
             ("exfiltration", lambda: self.exfiltration_detector.analyze(visible_text, hidden_elements, metadata)),
             ("agentic", lambda: self.agentic_detector.analyze(visible_text, hidden_elements)),
+            ("houyi", lambda: self.houyi_detector.analyze(visible_text, hidden_elements)),
         ]
         
-        # Add optional modules
         if self.semantic_detector:
             tasks.append(("semantic", lambda: self.semantic_detector.analyze(visible_text, hidden_elements)))
         
@@ -268,7 +240,6 @@ class UnseenLinkGuard:
         if self.ocr_analyzer and ocr_text:
             tasks.append(("ocr", lambda: self.ocr_analyzer.analyze(ocr_text, "image_input")))
         
-        # Execute in parallel
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_task = {executor.submit(task_fn): task_name for task_name, task_fn in tasks}
             
@@ -290,15 +261,12 @@ class UnseenLinkGuard:
         metadata: dict,
         ocr_text: str = None
     ) -> List:
-        """Run analysis modules sequentially."""
         
         analysis_results = []
         
-        # Intent classification (always first for intent-first enforcement)
         intent_analysis = self.intent_classifier.analyze(visible_text, hidden_elements)
         analysis_results.append(intent_analysis)
         
-        # Core analysis modules
         hidden_analysis = self.hidden_analyzer.analyze(visible_text, hidden_elements)
         analysis_results.append(hidden_analysis)
         
@@ -311,7 +279,9 @@ class UnseenLinkGuard:
         agentic_analysis = self.agentic_detector.analyze(visible_text, hidden_elements)
         analysis_results.append(agentic_analysis)
         
-        # Enhanced modules (if enabled)
+        houyi_analysis = self.houyi_detector.analyze(visible_text, hidden_elements)
+        analysis_results.append(houyi_analysis)
+        
         if self.semantic_detector:
             semantic_analysis = self.semantic_detector.analyze(visible_text, hidden_elements)
             analysis_results.append(semantic_analysis)
@@ -327,7 +297,6 @@ class UnseenLinkGuard:
         return analysis_results
     
     def _format_response(self, assessment, session_id: str) -> dict:
-        """Format assessment into response dictionary."""
         
         return {
             "session_id": session_id,
@@ -364,18 +333,13 @@ class UnseenLinkGuard:
 
 
 def read_file_content(file_path: Path) -> Tuple[str, str]:
-    """
-    Read file content, handling different file types.
-    Returns (content, image_path) where image_path is set if file is an image.
-    """
+    
     suffix = file_path.suffix.lower()
     
-    # Image files - return path for OCR processing
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
     if suffix in image_extensions:
         return f"[IMAGE FILE: {file_path.name}]", str(file_path)
     
-    # Text files
     text_extensions = {'.txt', '.md', '.html', '.xml', '.csv', '.json', '.py', '.js', '.yaml', '.yml', '.log'}
     if suffix in text_extensions:
         try:
@@ -386,7 +350,6 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
             except Exception as e:
                 raise ValueError(f"Cannot read text file {file_path}: {str(e)}")
     
-    # CSV files
     elif suffix == '.csv':
         try:
             content = []
@@ -401,7 +364,6 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
         except Exception as e:
             raise ValueError(f"Error reading CSV file {file_path}: {str(e)}")
     
-    # Excel files
     elif suffix in {'.xlsx', '.xls'}:
         if not HAS_OPENPYXL:
             raise ValueError(
@@ -424,7 +386,6 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
         except Exception as e:
             raise ValueError(f"Error reading Excel file {file_path}: {str(e)}")
     
-    # Word documents
     elif suffix == '.docx':
         if not HAS_PYTHON_DOCX:
             raise ValueError(
@@ -448,7 +409,6 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
         except Exception as e:
             raise ValueError(f"Error reading Word document {file_path}: {str(e)}")
     
-    # PowerPoint presentations
     elif suffix == '.pptx':
         if not HAS_PYTHON_PPTX:
             raise ValueError(
@@ -470,7 +430,6 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
         except Exception as e:
             raise ValueError(f"Error reading PowerPoint file {file_path}: {str(e)}")
     
-    # PDF files
     elif suffix == '.pdf':
         if not HAS_PYPDF:
             raise ValueError(
@@ -491,14 +450,12 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
         except Exception as e:
             raise ValueError(f"Error reading PDF file {file_path}: {str(e)}")
     
-    # Binary/unsupported formats
     elif suffix in {'.zip', '.tar', '.gz', '.bin'}:
         raise ValueError(
             f"Binary file format '{suffix}' is not supported. "
             "Supported: text, CSV, Excel, Word, PowerPoint, PDF, and images for OCR."
         )
     
-    # Unknown - try as text
     else:
         try:
             return file_path.read_text(encoding='utf-8').strip(), None
@@ -510,11 +467,10 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
 
 
 def main():
-    """CLI entry point."""
     
     print("=" * 60)
     print("UnseenLinkGuard - Enhanced LLM Security Gateway")
-    print("Features: Semantic Detection | De-obfuscation | OCR")
+    print("Features: HOUYI Detection | Semantic | De-obfuscation | OCR")
     print("=" * 60)
     print()
     
@@ -616,7 +572,6 @@ def main():
 
 
 def process_and_display_result(guard, input_data, source=None, image_path=None):
-    """Process input and display result (for non-interactive mode)."""
     try:
         if source:
             print(f"File: {source}")
@@ -628,7 +583,6 @@ def process_and_display_result(guard, input_data, source=None, image_path=None):
 
 
 def display_result(result):
-    """Display formatted result output."""
     print(f"Decision: {result['decision'].upper()}")
     print(f"Risk Level: {result['risk_level'].upper()}")
     print(f"Risk Score: {result['risk_score']}")

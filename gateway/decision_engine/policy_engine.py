@@ -130,6 +130,8 @@ class PolicyEngine:
         
         risk_score = self._apply_baseline_risks_refined(risk_score, results)
         
+        risk_score = self._apply_houyi_boost(risk_score, results)
+        
         agentic_result = next(
             (r for r in results if r.module_name == "agentic_intent_detector"),
             None
@@ -208,7 +210,7 @@ class PolicyEngine:
         )
         if hidden_result and hidden_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
             hidden_has_threats = any(
-                f.get('type') in ['instruction_override', 'ai_targeting', 'dangerous_script']
+                f.get('type') in ['instruction_keyword', 'dangerous_script']
                 for f in hidden_result.findings
             )
             if hidden_has_threats:
@@ -216,6 +218,59 @@ class PolicyEngine:
                 risk = max(risk, baseline)
         
         return risk
+    
+    def _apply_houyi_boost(self, current_risk: float, results: List[AnalysisResult]) -> float:
+        
+        houyi_result = next(
+            (r for r in results if r.module_name == "houyi_pattern_detector"),
+            None
+        )
+        
+        if not houyi_result:
+            return current_risk
+        
+        if houyi_result.risk_level == RiskLevel.SAFE:
+            return current_risk
+        
+        houyi_risk = houyi_result.risk_score
+        
+        has_all_components = False
+        component_count = 0
+        
+        for finding in houyi_result.findings:
+            if finding.get('type') in ['framework_component', 'separator', 'closure_separator', 'language_switch']:
+                component_count += 1
+                break
+        
+        for finding in houyi_result.findings:
+            if finding.get('type') in ['task_redefinition', 'prompt_leak', 'output_shaping']:
+                component_count += 1
+                break
+        
+        has_all_components = component_count >= 2
+        
+        if has_all_components:
+            boosted_risk = max(current_risk, houyi_risk)
+            
+            has_prompt_leak = any(
+                f.get('type') == 'prompt_leak'
+                for f in houyi_result.findings
+            )
+            
+            has_retasking = any(
+                f.get('type') == 'data_to_question_retasking'
+                for f in houyi_result.findings
+            )
+            
+            if has_prompt_leak:
+                boosted_risk = min(1.0, boosted_risk + 0.2)
+            
+            if has_retasking:
+                boosted_risk = min(1.0, boosted_risk + 0.15)
+            
+            return boosted_risk
+        else:
+            return max(current_risk, houyi_risk * 0.6)
     
     def _determine_primary_intent(
         self,
@@ -242,6 +297,33 @@ class PolicyEngine:
         
         if primary_intent == ContentIntent.MALICIOUS:
             return SecurityDecision.BLOCK
+        
+        houyi_result = next(
+            (r for r in analysis_results if r.module_name == "houyi_pattern_detector"),
+            None
+        )
+        
+        if houyi_result and houyi_result.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]:
+            has_prompt_leak = any(
+                f.get('type') == 'prompt_leak'
+                for f in houyi_result.findings
+            )
+            
+            has_full_pattern = False
+            component_types = set()
+            for finding in houyi_result.findings:
+                ftype = finding.get('type')
+                if ftype in ['framework_component', 'separator', 'closure_separator']:
+                    component_types.add('separator')
+                elif ftype in ['task_redefinition', 'prompt_leak', 'output_shaping']:
+                    component_types.add('disruptor')
+            
+            has_full_pattern = len(component_types) >= 2
+            
+            if has_prompt_leak or (has_full_pattern and houyi_result.risk_score >= 0.75):
+                return SecurityDecision.BLOCK
+            elif has_full_pattern:
+                return SecurityDecision.REQUIRE_APPROVAL
         
         if primary_intent == ContentIntent.CONDITIONAL_INSTRUCTIONAL:
             if risk_score >= 0.8:
@@ -512,6 +594,21 @@ class PolicyEngine:
             reasoning_parts.append(f"- {intent_result.details}")
             reasoning_parts.append("")
         
+        houyi_result = next(
+            (r for r in results if r.module_name == "houyi_pattern_detector"),
+            None
+        )
+        
+        if houyi_result and houyi_result.risk_level != RiskLevel.SAFE:
+            reasoning_parts.append("HOUYI Pattern Analysis:")
+            reasoning_parts.append(f"- {houyi_result.details}")
+            
+            critical_houyi = [f for f in houyi_result.findings if f.get('severity') == 'critical']
+            if critical_houyi:
+                reasoning_parts.append(f"- {len(critical_houyi)} critical HOUYI indicator(s)")
+            
+            reasoning_parts.append("")
+        
         semantic_result = next(
             (r for r in results if r.module_name == "semantic_threat_detector"),
             None
@@ -583,7 +680,7 @@ class PolicyEngine:
         for result in results:
             if result.module_name in ["agentic_intent_detector", "intent_classifier", 
                                       "semantic_threat_detector", "content_deobfuscator", 
-                                      "ocr_content_analyzer"]:
+                                      "ocr_content_analyzer", "houyi_pattern_detector"]:
                 continue
             
             if result.risk_level == RiskLevel.CRITICAL:
