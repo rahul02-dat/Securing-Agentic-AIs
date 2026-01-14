@@ -5,6 +5,7 @@ from gateway.shared.schemas import (
     AgentRestrictions, SecurityAssessment, ContentIntent
 )
 from gateway.shared.config_loader import get_config
+from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, IntentStrength
 
 
 class PolicyEngine:
@@ -19,6 +20,9 @@ class PolicyEngine:
         
         self.fail_closed = self.config.get('enforcement', 'fail_closed', default=True)
         self.strict_intent_enforcement = self.config.get('enforcement', 'strict_intent_enforcement', default=True)
+        
+        # Initialize intent strength scorer for multi-signal detection
+        self.intent_strength_scorer = IntentStrengthScorer()
     
     def _convert_intent_floors(self) -> dict:
         raw_floors = self.config.get_intent_risk_floors()
@@ -91,6 +95,14 @@ class PolicyEngine:
         self, 
         results: List[AnalysisResult]
     ) -> Tuple[RiskLevel, float]:
+        """
+        Calculate overall risk with intent-aware and multi-signal requirements.
+        
+        Key improvements:
+        1. Lowered intent floors - weak instructional intent doesn't auto-escalate
+        2. Multi-signal requirement - weak intent needs hidden + threat combo
+        3. Benign hidden content (metadata, comments) doesn't elevate risk alone
+        """
         
         risk_values = {
             RiskLevel.SAFE: 0.0,
@@ -105,12 +117,28 @@ class PolicyEngine:
             None
         )
         
+        # IMPROVED: Lowered intent floors - weak intent doesn't force escalation
+        # Only instructional/conditional should have meaningful floors
         intent_floor = 0.0
+        intent_strength = IntentStrength.WEAK  # Default assumption
+        
         if intent_result and intent_result.detected_intent:
-            intent_floor = self.intent_risk_floors.get(
-                intent_result.detected_intent, 
-                0.3
+            # Score the strength of instructional intent
+            visible_context = ""  # Can be passed if needed
+            intent_strength, _ = self.intent_strength_scorer.score_intent_strength(
+                visible_context,
+                intent_result.detected_intent.value
             )
+            
+            # CALIBRATED FLOORS (lowered from original)
+            intent_floor_map = {
+                ContentIntent.MALICIOUS: 0.90,              # Still very high
+                ContentIntent.CONDITIONAL_INSTRUCTIONAL: 0.50,  # Lowered from 0.70
+                ContentIntent.INSTRUCTIONAL: 0.30,          # Lowered from 0.50
+                ContentIntent.AMBIGUOUS: 0.15,              # Lowered from 0.30
+                ContentIntent.DESCRIPTIVE: 0.0,             # Unchanged
+            }
+            intent_floor = intent_floor_map.get(intent_result.detected_intent, 0.15)
         
         weighted_sum = 0.0
         total_weight = 0.0
@@ -126,9 +154,17 @@ class PolicyEngine:
         
         calculated_risk = weighted_sum / total_weight if total_weight > 0 else 0.0
         
+        # IMPROVED: Apply intent floor based on strength
+        # Weak intent: floor is very low (0.1), needs other signals
+        # Strong intent: floor is higher, single signal can trigger concern
+        if intent_strength == IntentStrength.WEAK:
+            intent_floor = min(intent_floor, 0.10)  # Weak intent floor capped at 0.1
+        elif intent_strength == IntentStrength.STRONG:
+            intent_floor = max(intent_floor, 0.40)  # Strong intent floor at least 0.4
+        
         risk_score = max(calculated_risk, intent_floor)
         
-        risk_score = self._apply_baseline_risks_refined(risk_score, results)
+        risk_score = self._apply_baseline_risks_refined(risk_score, results, intent_strength)
         
         risk_score = self._apply_houyi_boost(risk_score, results)
         
@@ -174,10 +210,20 @@ class PolicyEngine:
         
         return overall_risk, min(1.0, risk_score)
     
-    def _apply_baseline_risks_refined(self, current_risk: float, results: List[AnalysisResult]) -> float:
+    def _apply_baseline_risks_refined(
+        self, current_risk: float, results: List[AnalysisResult], 
+        intent_strength: IntentStrength = IntentStrength.WEAK
+    ) -> float:
+        """
+        Apply baseline risks with intent-aware adjustments.
+        
+        IMPROVED: Don't escalate benign hidden content (metadata, comments) to REQUIRE_APPROVAL.
+        Only escalate when multiple signals align.
+        """
         
         risk = current_risk
         
+        # OCR extracted text - only escalate if it has actual threat patterns
         ocr_result = next(
             (r for r in results if r.module_name == "ocr_content_analyzer"),
             None
@@ -188,9 +234,12 @@ class PolicyEngine:
                 for f in ocr_result.findings
             )
             if ocr_has_threats:
-                baseline = self.baseline_risks.get('ocr_extracted', 0.25)
-                risk = max(risk, baseline)
+                # Apply baseline only if strong intent or multiple threats
+                if intent_strength == IntentStrength.STRONG:
+                    baseline = self.baseline_risks.get('ocr_extracted', 0.15)  # Lowered from 0.25
+                    risk = max(risk, baseline)
         
+        # Deobfuscator results - obfuscation itself is a threat signal
         deobfuscator_result = next(
             (r for r in results if r.module_name == "content_deobfuscator"),
             None
@@ -201,21 +250,25 @@ class PolicyEngine:
                 for f in deobfuscator_result.findings
             )
             if decoded_has_suspicious:
-                baseline = self.baseline_risks.get('decoded_content', 0.20)
+                baseline = self.baseline_risks.get('decoded_content', 0.15)  # Lowered from 0.20
                 risk = max(risk, baseline)
         
+        # Hidden elements baseline - LOWERED and made conditional
+        # Only apply if there are actual threat findings, not just presence
         hidden_result = next(
             (r for r in results if r.module_name == "hidden_content_analyzer"),
             None
         )
-        if hidden_result and hidden_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
-            hidden_has_threats = any(
-                f.get('type') in ['instruction_keyword', 'dangerous_script']
+        if hidden_result and hidden_result.risk_level not in [RiskLevel.SAFE]:
+            has_actual_threats = any(
+                f.get('type') in ['instruction_keyword', 'dangerous_script', 'obfuscation']
                 for f in hidden_result.findings
             )
-            if hidden_has_threats:
-                baseline = self.baseline_risks.get('hidden_elements', 0.15)
-                risk = max(risk, baseline)
+            if has_actual_threats:
+                # Weak intent doesn't get baseline boost
+                if intent_strength != IntentStrength.WEAK:
+                    baseline = self.baseline_risks.get('hidden_elements', 0.08)  # Lowered from 0.15
+                    risk = max(risk, baseline)
         
         return risk
     
@@ -294,6 +347,12 @@ class PolicyEngine:
         analysis_results: List[AnalysisResult],
         primary_intent: ContentIntent
     ) -> SecurityDecision:
+        """
+        Determine security decision with multi-signal requirement.
+        
+        IMPROVED: Require multiple aligned signals before REQUIRE_APPROVAL,
+        while maintaining fail-safe for strong hidden injections.
+        """
         
         if primary_intent == ContentIntent.MALICIOUS:
             return SecurityDecision.BLOCK
@@ -325,41 +384,55 @@ class PolicyEngine:
             elif has_full_pattern:
                 return SecurityDecision.REQUIRE_APPROVAL
         
+        # IMPROVED: Conditional instructional now requires multiple signals
         if primary_intent == ContentIntent.CONDITIONAL_INSTRUCTIONAL:
+            signal_count = self._count_threat_signals(analysis_results)
             if risk_score >= 0.8:
                 return SecurityDecision.BLOCK
-            else:
+            elif risk_score >= 0.6 and signal_count >= 2:
+                # Multiple signals align = escalate
                 return SecurityDecision.REQUIRE_APPROVAL
+            elif risk_score >= 0.6:
+                # Single signal = sanitize, don't require approval
+                return SecurityDecision.SANITIZE
+            else:
+                return SecurityDecision.SANITIZE
         
+        # IMPROVED: Instructional intent with multi-signal requirement
         if primary_intent == ContentIntent.INSTRUCTIONAL:
-            if self.strict_intent_enforcement:
-                if risk_score >= 0.8:
-                    return SecurityDecision.BLOCK
-                elif risk_score >= 0.5:
-                    return SecurityDecision.REQUIRE_APPROVAL
-                else:
-                    return SecurityDecision.SANITIZE
+            signal_count = self._count_threat_signals(analysis_results)
+            if risk_score >= 0.8:
+                return SecurityDecision.BLOCK
+            elif risk_score >= 0.55 and signal_count >= 2:
+                # Multiple signals (hidden + threat) = require approval
+                return SecurityDecision.REQUIRE_APPROVAL
+            elif risk_score >= 0.55:
+                # Single signal = sanitize
+                return SecurityDecision.SANITIZE
             else:
-                if risk_score >= 0.8:
-                    return SecurityDecision.BLOCK
-                elif risk_score >= 0.5:
-                    return SecurityDecision.REQUIRE_APPROVAL
-                else:
-                    return SecurityDecision.SANITIZE
+                return SecurityDecision.SANITIZE
         
+        # IMPROVED: Ambiguous intent - require multiple signals before escalation
         if primary_intent == ContentIntent.AMBIGUOUS:
+            signal_count = self._count_threat_signals(analysis_results)
             if self.fail_closed:
-                if risk_score >= 0.6:
+                if risk_score >= 0.75:
                     return SecurityDecision.BLOCK
-                elif risk_score >= 0.3:
+                elif risk_score >= 0.55 and signal_count >= 2:
+                    # Multiple signals in ambiguous content = require approval
                     return SecurityDecision.REQUIRE_APPROVAL
+                elif risk_score >= 0.40:
+                    # Single weak signal = sanitize
+                    return SecurityDecision.SANITIZE
                 else:
                     return SecurityDecision.SANITIZE
             else:
-                if risk_score >= 0.6:
+                if risk_score >= 0.75:
                     return SecurityDecision.BLOCK
-                elif risk_score >= 0.3:
+                elif risk_score >= 0.55 and signal_count >= 2:
                     return SecurityDecision.REQUIRE_APPROVAL
+                elif risk_score >= 0.40:
+                    return SecurityDecision.SANITIZE
                 else:
                     return SecurityDecision.SANITIZE
         
@@ -381,16 +454,24 @@ class PolicyEngine:
             
             if has_bypass or risk_score >= 0.75:
                 return SecurityDecision.BLOCK
-            elif risk_score >= 0.4:
+            elif risk_score >= 0.50:
+                # Agentic intent with threat = escalate
                 return SecurityDecision.REQUIRE_APPROVAL
             else:
                 return SecurityDecision.SANITIZE
         
+        # IMPROVED: Threshold-based decisions with multi-signal awareness
         if risk_score >= self.decision_thresholds["block"]:
             return SecurityDecision.BLOCK
         
         elif risk_score >= self.decision_thresholds["require_approval"]:
-            return SecurityDecision.REQUIRE_APPROVAL
+            # Multi-signal check before requiring approval
+            signal_count = self._count_threat_signals(analysis_results)
+            if signal_count >= 2:
+                return SecurityDecision.REQUIRE_APPROVAL
+            else:
+                # Single weak signal = sanitize instead
+                return SecurityDecision.SANITIZE
         
         elif risk_score >= self.decision_thresholds["sanitize"]:
             return SecurityDecision.SANITIZE
@@ -745,3 +826,73 @@ class PolicyEngine:
             restricted.append("requires_human_approval")
         
         return restricted
+    
+    def _count_threat_signals(self, analysis_results: List[AnalysisResult]) -> int:
+        """
+        Count aligned threat signals for multi-signal decision making.
+        
+        Signals:
+        1. Hidden content with instructions (hidden_content_analyzer)
+        2. Prompt injection patterns (prompt_injection_detector)
+        3. Obfuscation/encoding (deobfuscator)
+        4. Agentic intent (agentic_intent_detector)
+        5. Suspicious patterns (houyi_pattern_detector)
+        
+        Returns: Count of detected threat signals (0-5)
+        """
+        signal_count = 0
+        
+        # Signal 1: Hidden content with threats
+        hidden_result = next(
+            (r for r in analysis_results if r.module_name == "hidden_content_analyzer"),
+            None
+        )
+        if hidden_result and hidden_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            has_real_threats = any(
+                f.get('type') in ['instruction_keyword', 'dangerous_script', 'obfuscation']
+                for f in hidden_result.findings
+            )
+            if has_real_threats:
+                signal_count += 1
+        
+        # Signal 2: Prompt injection patterns
+        injection_result = next(
+            (r for r in analysis_results if r.module_name == "prompt_injection_detector"),
+            None
+        )
+        if injection_result and injection_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            if injection_result.risk_score > 0.4:
+                signal_count += 1
+        
+        # Signal 3: Obfuscation/encoding
+        deobf_result = next(
+            (r for r in analysis_results if r.module_name == "content_deobfuscator"),
+            None
+        )
+        if deobf_result and deobf_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            has_suspicious = any(
+                f.get('type') == 'decoded_content' and f.get('suspicious_patterns')
+                for f in deobf_result.findings
+            )
+            if has_suspicious:
+                signal_count += 1
+        
+        # Signal 4: Agentic intent
+        agentic_result = next(
+            (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
+            None
+        )
+        if agentic_result and agentic_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            if agentic_result.risk_score > 0.4:
+                signal_count += 1
+        
+        # Signal 5: Houyi patterns
+        houyi_result = next(
+            (r for r in analysis_results if r.module_name == "houyi_pattern_detector"),
+            None
+        )
+        if houyi_result and houyi_result.risk_level not in [RiskLevel.SAFE, RiskLevel.LOW]:
+            if houyi_result.risk_score > 0.5:
+                signal_count += 1
+        
+        return signal_count

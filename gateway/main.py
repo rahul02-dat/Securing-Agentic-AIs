@@ -44,6 +44,7 @@ from gateway.analysis.semantic_detector import SemanticThreatDetector
 from gateway.analysis.deobfuscator import ContentDeobfuscator
 from gateway.analysis.ocr_analyzer import OCRContentAnalyzer
 from gateway.analysis.houyi_pattern_detector import HOUYIPatternDetector
+from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, IntentStrength
 from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
 from gateway.shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
@@ -67,6 +68,9 @@ class UnseenLinkGuard:
         self.exfiltration_detector = ExfiltrationDetector()
         self.agentic_detector = AgenticIntentDetector()
         self.houyi_detector = HOUYIPatternDetector()
+        
+        # Intent strength scorer for better discrimination
+        self.intent_strength_scorer = IntentStrengthScorer()
         
         self.semantic_detector = SemanticThreatDetector() if self.config.is_feature_enabled('semantic_detection') else None
         self.deobfuscator = ContentDeobfuscator() if self.config.is_feature_enabled('active_deobfuscation') else None
@@ -128,14 +132,16 @@ class UnseenLinkGuard:
                 extracted.visible_text, 
                 extracted.hidden_elements,
                 extracted.metadata,
-                ocr_text
+                ocr_text,
+                extracted.location_map
             )
         else:
             analysis_results = self._run_sequential_analysis(
                 extracted.visible_text,
                 extracted.hidden_elements,
                 extracted.metadata,
-                ocr_text
+                ocr_text,
+                extracted.location_map
             )
         
         assessment = self.policy_engine.make_decision(
@@ -217,15 +223,33 @@ class UnseenLinkGuard:
         visible_text: str,
         hidden_elements: List[str],
         metadata: dict,
-        ocr_text: str = None
+        ocr_text: str = None,
+        location_map: dict = None
     ) -> List:
+        """
+        Run analysis in parallel with intent-aware hidden content analysis.
+        """
         
         analysis_results = []
         
+        # First, run intent classification sequentially to get intent strength
+        intent_analysis = self.intent_classifier.analyze(visible_text, hidden_elements)
+        analysis_results.append(intent_analysis)
+        
+        # Determine intent strength for hidden content analysis
+        intent_strength = IntentStrength.WEAK  # Default
+        if intent_analysis.detected_intent:
+            intent_strength, _ = self.intent_strength_scorer.score_intent_strength(
+                visible_text,
+                intent_analysis.detected_intent.value
+            )
+        
+        # Now run other analyses in parallel
         tasks = [
-            ("intent", lambda: self.intent_classifier.analyze(visible_text, hidden_elements)),
-            ("hidden", lambda: self.hidden_analyzer.analyze(visible_text, hidden_elements)),
-            ("injection", lambda: self.injection_detector.analyze(visible_text, hidden_elements)),
+            ("hidden", lambda: self.hidden_analyzer.analyze(
+                visible_text, hidden_elements, location_map, intent_strength
+            )),
+            ("injection", lambda: self.injection_detector.analyze(visible_text, hidden_elements, location_map)),
             ("exfiltration", lambda: self.exfiltration_detector.analyze(visible_text, hidden_elements, metadata)),
             ("agentic", lambda: self.agentic_detector.analyze(visible_text, hidden_elements)),
             ("houyi", lambda: self.houyi_detector.analyze(visible_text, hidden_elements)),
@@ -259,18 +283,32 @@ class UnseenLinkGuard:
         visible_text: str,
         hidden_elements: List[str],
         metadata: dict,
-        ocr_text: str = None
+        ocr_text: str = None,
+        location_map: dict = None
     ) -> List:
+        """
+        Run analysis sequentially with intent-aware hidden content analysis.
+        """
         
         analysis_results = []
         
+        # First, determine intent and its strength
         intent_analysis = self.intent_classifier.analyze(visible_text, hidden_elements)
         analysis_results.append(intent_analysis)
         
-        hidden_analysis = self.hidden_analyzer.analyze(visible_text, hidden_elements)
+        intent_strength = IntentStrength.WEAK  # Default
+        if intent_analysis.detected_intent:
+            intent_strength, _ = self.intent_strength_scorer.score_intent_strength(
+                visible_text,
+                intent_analysis.detected_intent.value
+            )
+        
+        # Run hidden analysis with intent strength awareness
+        hidden_analysis = self.hidden_analyzer.analyze(visible_text, hidden_elements, location_map, intent_strength)
         analysis_results.append(hidden_analysis)
         
-        injection_analysis = self.injection_detector.analyze(visible_text, hidden_elements)
+        # Continue with other analyses
+        injection_analysis = self.injection_detector.analyze(visible_text, hidden_elements, location_map)
         analysis_results.append(injection_analysis)
         
         exfiltration_analysis = self.exfiltration_detector.analyze(visible_text, hidden_elements, metadata)
