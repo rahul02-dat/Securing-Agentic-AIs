@@ -45,7 +45,7 @@ from gateway.analysis.deobfuscator import ContentDeobfuscator
 from gateway.analysis.ocr_analyzer import OCRContentAnalyzer
 from gateway.analysis.houyi_pattern_detector import HOUYIPatternDetector
 from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, IntentStrength
-from gateway.decision_engine.policy_engine import PolicyEngine
+from gateway.learning.ml_policy_engine import MLPolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
 from gateway.shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel
 from gateway.shared.logging_utils import SecurityLogger
@@ -58,7 +58,7 @@ class UnseenLinkGuard:
         self.config = get_config()
         
         self.input_handler = LinkInputHandler()
-        self.policy_engine = PolicyEngine()
+        self.policy_engine = MLPolicyEngine(model_path="/Users/rahulmac/Documents/Projects/projects/Securing_Agentic_AIs/gateway/learning/models/security_model.pkl")
         self.agent_controller = AgentController()
         self.logger = SecurityLogger(log_dir=self.config.get('logging', 'log_dir', default='logs'))
         
@@ -147,7 +147,8 @@ class UnseenLinkGuard:
         assessment = self.policy_engine.make_decision(
             analysis_results,
             extracted.visible_text,
-            extracted.hidden_elements
+            extracted.hidden_elements,
+            raw_input=input_data
         )
         
         assessment.content_blocks = content_blocks
