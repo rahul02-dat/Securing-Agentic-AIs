@@ -45,6 +45,7 @@ from gateway.analysis.deobfuscator import ContentDeobfuscator
 from gateway.analysis.ocr_analyzer import OCRContentAnalyzer
 from gateway.analysis.houyi_pattern_detector import HOUYIPatternDetector
 from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, IntentStrength
+from gateway.decision_engine.policy_engine import PolicyEngine
 from gateway.learning.ml_policy_engine import MLPolicyEngine
 from gateway.agent_guard.agent_controller import AgentController
 from gateway.shared.schemas import SecurityEvent, SecurityDecision, ContentBlock, RiskLevel

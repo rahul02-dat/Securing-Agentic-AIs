@@ -1,28 +1,9 @@
-"""
-Refactored PolicyEngine with ML Integration
-============================================
-
-Integrates machine learning predictions with rule-based overrides.
-
-Key features:
-1. ML model predicts baseline risk
-2. Hard rules override when critical threats detected
-3. Fail-safe: defaults to strict rules if ML fails
-4. Fixes "weak intent" vulnerability
-
-Architecture:
-- ML prediction provides learned risk score
-- Critical detectors (hidden scripts, obfuscation) can override
-- Multi-signal requirement prevents false positives
-"""
-
 import sys
 import pickle
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-# Add project root to path to resolve gateway imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from gateway.shared.schemas import (
@@ -34,20 +15,10 @@ from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, Intent
 
 
 class MLPolicyEngine:
-    """
-    PolicyEngine with ML integration and hard-rule overrides.
-    
-    Decision Flow:
-    1. ML model predicts risk score (if available)
-    2. Check for critical overrides (hidden scripts, obfuscation)
-    3. Apply multi-signal validation
-    4. Fallback to rule-based if ML unavailable
-    """
     
     def __init__(self, model_path: str = None):
         self.config = get_config()
         
-        # Load ML model if available
         self.ml_model = None
         self.feature_extractor = None
         self.ml_available = False
@@ -55,22 +26,18 @@ class MLPolicyEngine:
         if model_path:
             self._load_ml_model(model_path)
         
-        # Fallback to rule-based weights
         self.risk_weights = self.config.get_risk_weights()
         self.decision_thresholds = self.config.get_decision_thresholds()
         self.intent_risk_floors = self._convert_intent_floors()
         self.baseline_risks = self.config.get_baseline_risks()
         
         self.fail_closed = self.config.get('enforcement', 'fail_closed', default=True)
-        self.strict_intent_enforcement = self.config.get('enforcement', 'strict_intent_enforcement', default=True)
         
-        # Intent strength scorer
         self.intent_strength_scorer = IntentStrengthScorer()
         
-        print(f"MLPolicyEngine initialized (ML model: {self.ml_available})")
+        print(f"PolicyEngine initialized (ML model: {self.ml_available})")
     
     def _load_ml_model(self, model_path: str):
-        """Load trained ML model."""
         try:
             from gateway.learning.feature_extractor import FeatureExtractor
             
@@ -97,7 +64,6 @@ class MLPolicyEngine:
             self.ml_available = False
     
     def _convert_intent_floors(self) -> dict:
-        """Convert intent floors from config."""
         raw_floors = self.config.get_intent_risk_floors()
         
         intent_map = {
@@ -117,46 +83,25 @@ class MLPolicyEngine:
         hidden_elements: List[str],
         raw_input: str = None
     ) -> SecurityAssessment:
-        """
-        Make security decision using ML + hard rules.
         
-        Args:
-            analysis_results: Results from all detectors
-            visible_text: Visible content
-            hidden_elements: Hidden content elements
-            raw_input: Original raw input (for feature extraction)
-            
-        Returns:
-            SecurityAssessment with decision
-        """
-        
-        # Get ML prediction if available
         ml_risk_score = None
         if self.ml_available and raw_input:
             ml_risk_score = self._get_ml_prediction(raw_input)
         
-        # Calculate rule-based risk as fallback
         rule_based_risk, rule_risk_score = self._calculate_rule_based_risk(analysis_results)
         
-        # Determine primary intent
         primary_intent, intent_confidence = self._determine_primary_intent(analysis_results)
         
-        # HYBRID DECISION: Combine ML + Rules
         if ml_risk_score is not None:
-            # Use ML prediction as base
             overall_risk_score = ml_risk_score
             decision_source = "ml_model"
         else:
-            # Fallback to rules
             overall_risk_score = rule_risk_score
             decision_source = "rule_based"
         
-        # CRITICAL OVERRIDE LOGIC
-        # Even if ML says "safe", override for critical threats
         override_applied = False
         override_reason = None
         
-        # Override 1: Hidden dangerous scripts (CRITICAL)
         hidden_result = next(
             (r for r in analysis_results if r.module_name == "hidden_content_analyzer"),
             None
@@ -170,7 +115,6 @@ class MLPolicyEngine:
                 override_applied = True
                 override_reason = "dangerous_script_detected"
         
-        # Override 2: Obfuscation with suspicious content
         deobf_result = next(
             (r for r in analysis_results if r.module_name == "content_deobfuscator"),
             None
@@ -185,7 +129,6 @@ class MLPolicyEngine:
                 override_applied = True
                 override_reason = "obfuscated_suspicious_content"
         
-        # Override 3: Permission bypass attempts
         agentic_result = next(
             (r for r in analysis_results if r.module_name == "agentic_intent_detector"),
             None
@@ -200,10 +143,8 @@ class MLPolicyEngine:
                 override_applied = True
                 override_reason = "permission_bypass_attempt"
         
-        # Convert score to risk level
         overall_risk = self._score_to_risk_level(overall_risk_score)
         
-        # Make decision
         decision = self._determine_decision(
             overall_risk, 
             overall_risk_score, 
@@ -211,19 +152,16 @@ class MLPolicyEngine:
             primary_intent
         )
         
-        # Determine restrictions
         restrictions = self._determine_restrictions(
             overall_risk, 
             analysis_results,
             primary_intent
         )
         
-        # Sanitize if needed
         sanitized_content = None
         if decision == SecurityDecision.SANITIZE:
             sanitized_content = self._sanitize_content(visible_text, analysis_results)
         
-        # Generate reasoning
         reasoning = self._generate_reasoning(
             analysis_results, overall_risk, overall_risk_score, decision, 
             primary_intent, decision_source, override_applied, override_reason
@@ -252,21 +190,10 @@ class MLPolicyEngine:
         return assessment
     
     def _get_ml_prediction(self, raw_input: str) -> float:
-        """
-        Get ML model prediction.
-        
-        Args:
-            raw_input: Raw input text
-            
-        Returns:
-            Risk score (0.0 to 1.0)
-        """
         try:
-            # Extract features
             features = self.feature_extractor.extract_features(raw_input)
-            features = features.reshape(1, -1)  # Single sample
+            features = features.reshape(1, -1)
             
-            # Predict probability
             risk_score = self.ml_model.predict_proba(features)[0, 1]
             
             return float(risk_score)
@@ -279,11 +206,6 @@ class MLPolicyEngine:
         self, 
         results: List[AnalysisResult]
     ) -> Tuple[RiskLevel, float]:
-        """
-        Calculate risk using rule-based weights (fallback).
-        
-        This is the original risk calculation logic.
-        """
         risk_values = {
             RiskLevel.SAFE: 0.0,
             RiskLevel.LOW: 0.25,
@@ -305,7 +227,6 @@ class MLPolicyEngine:
         
         calculated_risk = weighted_sum / total_weight if total_weight > 0 else 0.0
         
-        # Apply intent floors
         intent_result = next(
             (r for r in results if r.module_name == "intent_classifier"),
             None
@@ -321,7 +242,6 @@ class MLPolicyEngine:
         return risk_level, min(1.0, risk_score)
     
     def _score_to_risk_level(self, score: float) -> RiskLevel:
-        """Convert numeric score to RiskLevel enum."""
         if score >= 0.8:
             return RiskLevel.CRITICAL
         elif score >= 0.6:
@@ -337,7 +257,6 @@ class MLPolicyEngine:
         self,
         analysis_results: List[AnalysisResult]
     ) -> Tuple[ContentIntent, float]:
-        """Determine primary intent from analysis."""
         intent_result = next(
             (r for r in analysis_results if r.module_name == "intent_classifier"),
             None
@@ -355,21 +274,13 @@ class MLPolicyEngine:
         analysis_results: List[AnalysisResult],
         primary_intent: ContentIntent
     ) -> SecurityDecision:
-        """
-        Determine security decision.
         
-        Uses threshold-based logic with multi-signal validation.
-        """
-        
-        # Malicious intent = BLOCK
         if primary_intent == ContentIntent.MALICIOUS:
             return SecurityDecision.BLOCK
         
-        # Critical risk = BLOCK
         if risk_score >= self.decision_thresholds["block"]:
             return SecurityDecision.BLOCK
         
-        # High risk with multiple signals = REQUIRE_APPROVAL
         elif risk_score >= self.decision_thresholds["require_approval"]:
             signal_count = self._count_threat_signals(analysis_results)
             if signal_count >= 2:
@@ -377,15 +288,12 @@ class MLPolicyEngine:
             else:
                 return SecurityDecision.SANITIZE
         
-        # Medium risk = SANITIZE
         elif risk_score >= self.decision_thresholds["sanitize"]:
             return SecurityDecision.SANITIZE
         
-        # Low risk descriptive = ALLOW
         elif primary_intent == ContentIntent.DESCRIPTIVE and risk_score < self.decision_thresholds["allow"]:
             return SecurityDecision.ALLOW
         
-        # Default = SANITIZE (fail-safe)
         else:
             return SecurityDecision.SANITIZE
     
@@ -395,7 +303,6 @@ class MLPolicyEngine:
         results: List[AnalysisResult],
         primary_intent: ContentIntent
     ) -> AgentRestrictions:
-        """Determine agent restrictions based on risk."""
         restrictions = AgentRestrictions()
         
         if risk_level == RiskLevel.CRITICAL:
@@ -428,12 +335,10 @@ class MLPolicyEngine:
         content: str, 
         results: List[AnalysisResult]
     ) -> str:
-        """Sanitize content by removing threats."""
         import re
         
         sanitized = content
         
-        # Remove suspicious phrases
         all_findings = []
         for result in results:
             all_findings.extend(result.findings)
@@ -443,7 +348,6 @@ class MLPolicyEngine:
                 phrase = finding["matched_text"]
                 sanitized = sanitized.replace(phrase, "[REDACTED]")
         
-        # Remove URLs
         url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
         sanitized = re.sub(url_pattern, '[URL_REMOVED]', sanitized)
         
@@ -460,7 +364,6 @@ class MLPolicyEngine:
         override_applied: bool,
         override_reason: str
     ) -> str:
-        """Generate human-readable reasoning."""
         parts = [
             f"DECISION SOURCE: {decision_source.upper()}",
             f"PRIMARY INTENT: {primary_intent.value.upper()}",
@@ -473,7 +376,6 @@ class MLPolicyEngine:
             parts.append(f"⚠️ CRITICAL OVERRIDE APPLIED: {override_reason}")
             parts.append("")
         
-        # Add key findings
         critical_results = [r for r in results if r.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]]
         if critical_results:
             parts.append("Critical Findings:")
@@ -487,7 +389,6 @@ class MLPolicyEngine:
         self, 
         restrictions: AgentRestrictions
     ) -> List[str]:
-        """Get list of restricted capabilities."""
         restricted = []
         
         if restrictions.mode != "NORMAL":
@@ -504,10 +405,8 @@ class MLPolicyEngine:
         return restricted
     
     def _count_threat_signals(self, analysis_results: List[AnalysisResult]) -> int:
-        """Count aligned threat signals."""
         signal_count = 0
         
-        # Signal 1: Hidden content threats
         hidden_result = next(
             (r for r in analysis_results if r.module_name == "hidden_content_analyzer"),
             None
@@ -515,7 +414,6 @@ class MLPolicyEngine:
         if hidden_result and hidden_result.risk_score > 0.4:
             signal_count += 1
         
-        # Signal 2: Injection patterns
         injection_result = next(
             (r for r in analysis_results if r.module_name == "prompt_injection_detector"),
             None
@@ -523,7 +421,6 @@ class MLPolicyEngine:
         if injection_result and injection_result.risk_score > 0.4:
             signal_count += 1
         
-        # Signal 3: Obfuscation
         deobf_result = next(
             (r for r in analysis_results if r.module_name == "content_deobfuscator"),
             None
@@ -532,7 +429,3 @@ class MLPolicyEngine:
             signal_count += 1
         
         return signal_count
-
-
-# Backward compatibility: alias to original PolicyEngine
-PolicyEngine = MLPolicyEngine
