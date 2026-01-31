@@ -85,7 +85,7 @@ class LinkInputHandler:
             from bs4 import BeautifulSoup
             
             response = requests.get(url, timeout=10, headers={
-                'User-Agent': 'UnseenLinkGuard/1.0 Security Scanner'
+                'User-Agent': 'PromptWall/1.0 Security Scanner'
             })
             response.raise_for_status()
             

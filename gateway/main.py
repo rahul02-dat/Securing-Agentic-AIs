@@ -53,7 +53,7 @@ from gateway.shared.logging_utils import SecurityLogger
 from gateway.shared.config_loader import get_config
 
 
-class UnseenLinkGuard:
+class PromptWall:
     
     def __init__(self):
         self.config = get_config()
@@ -80,7 +80,7 @@ class UnseenLinkGuard:
         self.parallel_enabled = self.config.get_parallel_execution_enabled()
         self.max_workers = self.config.get_max_workers()
         
-        self.logger.log_info("UnseenLinkGuard initialized with HOUYI pattern detection")
+        self.logger.log_info("Security Wall initialized")
         self.logger.log_info(f"Parallel execution: {self.parallel_enabled}, Max workers: {self.max_workers}")
         self.logger.log_info(f"Semantic detection: {self.semantic_detector is not None}")
         self.logger.log_info(f"De-obfuscation: {self.deobfuscator is not None}")
@@ -509,12 +509,12 @@ def read_file_content(file_path: Path) -> Tuple[str, str]:
 def main():
     
     print("=" * 60)
-    print("UnseenLinkGuard - Enhanced LLM Security Gateway")
+    print("PromptWall - Enhanced LLM Security Gateway")
     print("Features: HOUYI Detection | Semantic | De-obfuscation | OCR")
     print("=" * 60)
     print()
     
-    guard = UnseenLinkGuard()
+    guard = PromptWall()
     
     if len(sys.argv) > 1:
         input_arg = " ".join(sys.argv[1:])
@@ -572,7 +572,7 @@ def main():
             user_input = input("> ").strip()
             
             if user_input.lower() in ['quit', 'exit', 'q']:
-                print("\nExiting UnseenLinkGuard. Stay secure!")
+                print("\nExiting PromptWall. Stay secure!")
                 break
             
             if not user_input:
@@ -604,7 +604,7 @@ def main():
             display_result(result)
             
         except KeyboardInterrupt:
-            print("\n\nExiting UnseenLinkGuard. Stay secure!")
+            print("\n\nExiting PromptWall. Stay secure!")
             break
         except Exception as e:
             print(f"\nError: {str(e)}")
@@ -629,7 +629,7 @@ def display_result(result):
     print(f"Primary Intent: {result['primary_intent'].upper()} (confidence: {result['intent_confidence']})")
     
     if result['agentic_intent_detected']:
-        print(f"\n⚠️  AGENTIC INTENT DETECTED")
+        print(f"\nAGENTIC INTENT DETECTED")
         if result['requested_actions']:
             print(f"Requested Actions: {', '.join(result['requested_actions'])}")
     

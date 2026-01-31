@@ -14,7 +14,7 @@ class SecurityLogger:
         self.log_dir.mkdir(exist_ok=True)
         self.log_file = self.log_dir / "security_events.jsonl"
         
-        self.logger = logging.getLogger("unseenlinkguard")
+        self.logger = logging.getLogger("PromptWall")
         self.logger.setLevel(logging.INFO)
         
         handler = logging.StreamHandler()

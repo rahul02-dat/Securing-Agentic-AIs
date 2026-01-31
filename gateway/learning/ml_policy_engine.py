@@ -373,7 +373,7 @@ class MLPolicyEngine:
         ]
         
         if override_applied:
-            parts.append(f"⚠️ CRITICAL OVERRIDE APPLIED: {override_reason}")
+            parts.append(f"CRITICAL OVERRIDE APPLIED: {override_reason}")
             parts.append("")
         
         critical_results = [r for r in results if r.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]]
