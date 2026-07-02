@@ -12,6 +12,7 @@ from gateway.shared.schemas import (
 )
 from gateway.shared.config_loader import get_config
 from gateway.analysis.intent_strength_scorer import IntentStrengthScorer, IntentStrength
+from gateway.decision_engine.policy_engine import SystemPromptContextAnalyzer
 
 
 class MLPolicyEngine:
@@ -34,6 +35,7 @@ class MLPolicyEngine:
         self.fail_closed = self.config.get('enforcement', 'fail_closed', default=True)
         
         self.intent_strength_scorer = IntentStrengthScorer()
+        self.system_prompt_analyzer = SystemPromptContextAnalyzer()
         
         print(f"PolicyEngine initialized (ML model: {self.ml_available})")
     
@@ -81,8 +83,11 @@ class MLPolicyEngine:
         analysis_results: List[AnalysisResult],
         visible_text: str,
         hidden_elements: List[str],
-        raw_input: str = None
+        raw_input: Optional[str] = None,
+        agent_system_prompt: Optional[str] = None
     ) -> SecurityAssessment:
+        
+        context_analysis = self.system_prompt_analyzer.analyze(visible_text, agent_system_prompt)
         
         ml_risk_score = None
         if self.ml_available and raw_input:
@@ -143,6 +148,13 @@ class MLPolicyEngine:
                 override_applied = True
                 override_reason = "permission_bypass_attempt"
         
+        if context_analysis:
+            adjustment = context_analysis.get("risk_adjustment", 0.0)
+            malicious_floor = 0.90 if (
+                primary_intent == ContentIntent.MALICIOUS
+            ) else 0.0
+            overall_risk_score = max(malicious_floor, min(1.0, overall_risk_score + adjustment))
+            
         overall_risk = self._score_to_risk_level(overall_risk_score)
         
         decision = self._determine_decision(
@@ -164,7 +176,8 @@ class MLPolicyEngine:
         
         reasoning = self._generate_reasoning(
             analysis_results, overall_risk, overall_risk_score, decision, 
-            primary_intent, decision_source, override_applied, override_reason
+            primary_intent, decision_source, override_applied, override_reason,
+            context_analysis
         )
         
         from datetime import datetime
@@ -362,7 +375,8 @@ class MLPolicyEngine:
         primary_intent: ContentIntent,
         decision_source: str,
         override_applied: bool,
-        override_reason: str
+        override_reason: str,
+        context_analysis: Optional[dict] = None
     ) -> str:
         parts = [
             f"DECISION SOURCE: {decision_source.upper()}",
@@ -375,6 +389,15 @@ class MLPolicyEngine:
         if override_applied:
             parts.append(f"CRITICAL OVERRIDE APPLIED: {override_reason}")
             parts.append("")
+            
+        if context_analysis and context_analysis.get("explanation"):
+            adj = context_analysis.get("risk_adjustment", 0.0)
+            if adj != 0.0:
+                parts.append("System-Prompt Context Analysis:")
+                parts.append(
+                    f"- {context_analysis['explanation']} (adjustment: {adj:+.2f})"
+                )
+                parts.append("")
         
         critical_results = [r for r in results if r.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]]
         if critical_results:
